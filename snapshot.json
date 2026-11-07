@@ -1,5 +1,5 @@
 {
-  "snapshot": "2026-11-07-scene-speaker-sync",
+  "snapshot": "2026-11-07-settings-top-actions",
   "upstream": {
     "package": "dsh-tavern",
     "version": "0.1.0",
@@ -9,7 +9,7 @@
   "files": {
     "dist/dsh-tavern/LICENSE": "974324725104c692c1320a6d36b2b832f6aa648ba5312fd89788862c91e8c703",
     "dist/dsh-tavern/cordis.patch.yml": "03367517107349293495084642a41090ec4cf0cf72ba285707193a8aa233d140",
-    "dist/dsh-tavern/lib/client.js": "b1c645939d6a0a10f125e0d3920d4ddb58926bdafaa6ef1a302ad832e8b2ed27",
+    "dist/dsh-tavern/lib/client.js": "770541ceb733e6a5c8e8d5ede19ace175a7690b922dd8bd1a2d60bb7919f7a53",
     "dist/dsh-tavern/lib/index.d.ts": "86d54e424d5034db567dadf626688b2f8bb5327f8ac11a42edfe26c16cff2068",
     "dist/dsh-tavern/lib/index.js": "ce6cdf233511fe353da558c4115a4a44f01a5a60491e4bdaff93256b58564e40",
     "dist/dsh-tavern/package.json": "7aaef38d67ac1258674a174c8fdefdbe313dc80efc0857b4c105535f5881c118",
