@@ -1,0 +1,8 @@
+{
+  "name": "dsh-tavern-personal-backup",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node scripts/verify.mjs"
+  }
+}

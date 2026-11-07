@@ -1,0 +1,66 @@
+{
+  "name": "dsh-tavern",
+  "version": "0.1.0",
+  "description": "DSH 酒馆：SillyTavern 风格角色扮演插件 —— 世界书 / 预设 / 人物卡 + 多 agent 扮演",
+  "type": "module",
+  "main": "./lib/index.js",
+  "types": "./lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tk553521/dsh-tavern.git"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
+    }
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=22",
+    "dsh": ">=0.2.2-alpha.3 <0.3.0"
+  },
+  "scripts": {
+    "build": "tsdown",
+    "dev:sync": "tsdown && node scripts/sync-profile.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.host.json && tsc --noEmit -p tsconfig.client.json",
+    "verify": "tsdown && node scripts/verify/library.mjs && node scripts/verify/lorebook.mjs && node scripts/verify/prompt.mjs && node scripts/verify/seed.mjs && node scripts/verify/plugin.mjs",
+    "prepare": "npm run build"
+  },
+  "keywords": [
+    "dsh",
+    "plugin",
+    "tavern",
+    "sillytavern",
+    "角色扮演"
+  ],
+  "license": "MIT",
+  "peerDependencies": {
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/react": "~18.3.1",
+    "@types/react-dom": "~18.3.0",
+    "lightningcss": "^1.30.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "tsdown": "^0.22.14",
+    "typescript": "^5.9.0"
+  }
+}

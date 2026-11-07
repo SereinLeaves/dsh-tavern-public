@@ -1,0 +1,34 @@
+{
+  "snapshot": "2026-11-07-installed-and-verified",
+  "upstream": {
+    "package": "dsh-tavern",
+    "version": "0.1.0",
+    "repository": "https://github.com/tk553521/dsh-tavern",
+    "license": "MIT"
+  },
+  "files": {
+    "dist/dsh-tavern/LICENSE": "974324725104c692c1320a6d36b2b832f6aa648ba5312fd89788862c91e8c703",
+    "dist/dsh-tavern/cordis.patch.yml": "03367517107349293495084642a41090ec4cf0cf72ba285707193a8aa233d140",
+    "dist/dsh-tavern/lib/client.js": "764a6567fb23f7afee0f68f53e8de24b1242dfe331a1de480b890992a6f385ed",
+    "dist/dsh-tavern/lib/index.d.ts": "86d54e424d5034db567dadf626688b2f8bb5327f8ac11a42edfe26c16cff2068",
+    "dist/dsh-tavern/lib/index.js": "082d2833f0defa986e902ad37d55b1c06ad379b69ae823582ff4e5fe111b2c98",
+    "dist/dsh-tavern/package.json": "7aaef38d67ac1258674a174c8fdefdbe313dc80efc0857b4c105535f5881c118",
+    "extras/tavern-cot-scope/LICENSE": "ebb4f09972aee8608be255debaf78451a68e95c290f55c240dec2ecfa16ea6be",
+    "extras/tavern-cot-scope/README.i18n.yaml": "969a4835ce7e94fb4539865fcc8728fc620d11609a850553cbca9e43e744cc7e",
+    "extras/tavern-cot-scope/README.md": "f87b96baacf4ad869fbb9910534d05f2ad74632f9355ccb1fcd747f64a58757f",
+    "extras/tavern-cot-scope/README.zh.md": "3795713ddd6bab435931a3c22be011d21fad3d4c1377bb6818a3d5260132f846",
+    "extras/tavern-cot-scope/lib/client.js": "52c9dbb4d3119ac4b9c1e138738397f20fc49076cce8678874695538668e7d32",
+    "extras/tavern-cot-scope/lib/index.js": "19a86fd5464c2d7c3253749adb35d8bf489b288d1ec3c818cd51462cd7321bd8",
+    "extras/tavern-cot-scope/lib/typert.host.js": "93af90604d06043cc3ca6f9c411dd402a5d477b8db496712905e93540bca59f6",
+    "extras/tavern-cot-scope/lib/typert.remote-client.js": "d1e919b88d0d62f2aad4bfae7684d10c0384e7f3589a390e7fc18a523c304387",
+    "extras/tavern-cot-scope/locale/de.json": "2381b379024e23dd46f0149862795fd96bd3ca1f5cc8df16d19ab89123985a2e",
+    "extras/tavern-cot-scope/locale/en.json": "95070f05879d6fb3c1b72062c10da157085e5066640a70b15c54219dbeb3e02b",
+    "extras/tavern-cot-scope/locale/es.json": "6cd9dfa7c2527dc9a128bf3e0d0e6a707c2df5684c15a974c02b8871b2849d91",
+    "extras/tavern-cot-scope/locale/fr.json": "2e431c510fd1203410f3156a38f7b6b75610b498f680cbeee12d36e5c9312a8a",
+    "extras/tavern-cot-scope/locale/ja.json": "d472341b685d65739b9955ac20ad73456d025e5915af7b2b91a57ec8b942418c",
+    "extras/tavern-cot-scope/locale/pt.json": "e522b7b593eb0c6b8f09c355dc71b3a8563b9dfdc17004da6687cf17fff6fb70",
+    "extras/tavern-cot-scope/locale/ru.json": "86b9918b0c3f75dce691e3c1b2045695409baaa75846ef1b6ff295f6693d19c6",
+    "extras/tavern-cot-scope/locale/zh.json": "09b9fb51c8cceee846c034d9ac25df800c8cea9f08f495825985b8c2922ec83d",
+    "extras/tavern-cot-scope/package.json": "d5537e822e72a7babd67d4f3f1c4cdd75606480baec2213b1ca775c306e19d43"
+  }
+}
