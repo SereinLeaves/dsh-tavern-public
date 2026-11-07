@@ -1,0 +1,72 @@
+import {readFile,mkdtemp,rm} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import assert from 'node:assert/strict';
+import {Readable} from 'node:stream';
+const code=await readFile(new URL('../dist/dsh-tavern/lib/index.js',import.meta.url),'utf8');
+const {LibraryStore,TavernStorage,TavernSessionRuntime:Runtime,reviewWindow,dueMemoryReviews,tavernHandler}=await import('data:text/javascript;base64,'+Buffer.from(code+'\nexport {LibraryStore,TavernStorage,TavernSessionRuntime,reviewWindow,dueMemoryReviews,tavernHandler};').toString('base64'));
+const root=await mkdtemp(join(tmpdir(),'tavern-auto-memory-'));
+const logger={warn(){},error(){}};
+try {
+ const lib=await LibraryStore.open(root,logger), storage=new TavernStorage(lib,{get:()=>({})});
+ const rt=new Runtime({storage,logger,config:{scanMessages:12,worldInfoBudgetChars:8000}});
+ const events=[];
+ function turn(n){events.push({type:'turn/start',data:{turn:n}},{type:'user/message',data:{id:'u'+n,content:[{type:'text',text:'角色甲约定明天去图书馆，第'+n+'次谈话。'}]}},{type:'assistant/message',data:{message:{id:'a'+n,content:[{type:'reasoning',text:'private reasoning'},{type:'text',text:'角色甲：明天在图书馆见。'}]}}},{type:'turn/end',data:{turn:n,reason:{kind:'completed'}}});}
+ const manual={uid:0,content:'原始手动经历',key:[],constant:true};
+ const memory={enabled:true,book:{entries:[manual]},autoReview:{enabled:true,interval:5,checkedTurns:0}};
+ const play={id:'play-test',sessionId:'session-test',characterIds:['role-a'],characterMemories:{'role-a':memory},updatedAt:'v0'};
+ await storage.upsertCharacter({id:"role-a",card:{data:{name:"角色甲"}}});
+ await storage.upsertPlay(play);
+ const agent={id:play.sessionId,session:{snapshotEvents:()=>events}};
+ rt.directors.set(play.id,{agent});
+ const tool=rt.memoryReviewTool();
+ for(let n=1;n<=4;n++)turn(n);
+ assert.deepEqual(dueMemoryReviews(play,events).due,[]);
+ await assert.rejects(tool.execute({characterId:'role-a',entries:[]},{agent}));
+ turn(5);
+ assert.deepEqual(dueMemoryReviews(play,events).due,['role-a']);
+ assert.ok(rt.memoryReviewPrompt(play).includes('本轮附带经历检查'));
+ assert.ok(!rt.memoryReviewPrompt(play).includes('private reasoning'));
+ events.push({type:'turn/start',data:{turn:6}},{type:'user/message',data:{id:'unfinished',content:[{type:'text',text:'尚未发生的新事件'}]}});
+ assert.equal(reviewWindow(events).messages.some(m=>m.id==='unfinished'),false);
+ const candidate={content:'约定次日去图书馆，尚未兑现。',keywords:['图书馆'],messageId:'a5',quote:'明天在图书馆见。'};
+ await assert.rejects(tool.execute({characterId:'role-b',entries:[candidate]},{agent}));
+ await assert.rejects(tool.execute({characterId:'role-a',entries:[{...candidate,quote:'伪造的来源原文'}]},{agent}));
+ await assert.rejects(tool.execute({characterId:'role-a',entries:[candidate]},{agent:{...agent}}));
+ assert.deepEqual(await tool.execute({characterId:'role-a',entries:[candidate,candidate]},{agent}),{added:1});
+ let saved=storage.getPlay(play.id);
+ assert.equal(saved.characterMemories['role-a'].book.entries[0].content,manual.content);
+ assert.equal(saved.characterMemories['role-a'].book.entries.length,1);
+ assert.equal(saved.characterMemories['role-a'].automaticEntries.length,1);
+ const roleContext=rt.buildLoreContext(saved,{wrap:text=>text},'role-a');
+ assert.ok(roleContext.text({agent:{session:{snapshotEvents:()=>[]}}}).includes(candidate.content));
+ await assert.rejects(tool.execute({characterId:'role-a',entries:[]},{agent}));
+ // Finish turn 6 and complete five further successful rounds.
+ events.push({type:'turn/end',data:{turn:6,reason:{kind:'completed'}}});
+ for(let n=7;n<=10;n++)turn(n);
+ assert.deepEqual(await tool.execute({characterId:'role-a',entries:[]},{agent}),{added:0});
+ saved=storage.getPlay(play.id);
+ assert.equal(saved.characterMemories['role-a'].autoReview.checkedTurns,10);
+ assert.equal(saved.characterMemories['role-a'].automaticEntries.length,1);
+ assert.deepEqual(dueMemoryReviews(saved,events.slice(0,4)).due,[]);
+ rt.updatePlaySettings = async (_, updated) => { await storage.upsertPlay(updated); };
+ agent.status='idle';
+ async function save(patch){
+  let status,result;
+  const req=Readable.from([Buffer.from(JSON.stringify({enabled:true,book:memory.book,expectedUpdatedAt:storage.getPlay(play.id).updatedAt,...patch}))]);
+  Object.assign(req,{method:'PUT',url:'/tavern/plays/play-test/memories/role-a',headers:{host:'localhost','content-type':'application/json'}});
+  await tavernHandler({storage,runtime:rt,logger,config:{allowedHosts:[]}},req,{writeHead(code){status=code},end(value){result=JSON.parse(value)}});
+  return {status,result};
+ }
+ assert.equal((await save({autoReview:{enabled:true,interval:0}})).status,400);
+ const uid=saved.characterMemories['role-a'].automaticEntries[0].uid;
+ assert.equal((await save({autoReview:{enabled:false,interval:5},dismissAutomaticIds:[uid]})).status,200);
+ saved=storage.getPlay(play.id);
+ assert.equal(saved.characterMemories['role-a'].autoReview.enabled,false);
+ assert.equal(saved.characterMemories['role-a'].automaticEntries[0].disable,true);
+ assert.equal(saved.characterMemories['role-a'].book.entries[0].content,manual.content);
+ assert.equal(saved.characterMemories['role-a'].book.entries.length,1);
+ const reopened=await LibraryStore.open(root,logger);
+ assert.deepEqual(reopened.play(play.id),JSON.parse(JSON.stringify(saved)));
+ console.log('PASS auto memory: interval, completed-only text, no reasoning, owner/session guards, quote validation, dedup, no-change cursor, manual preservation, branch guard, durable read-back.');
+}finally{await rm(root,{recursive:true,force:true})}

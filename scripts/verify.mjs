@@ -9,7 +9,7 @@ for(const [path,expected] of Object.entries(manifest.files)){
  if(createHash('sha256').update(bytes).digest('hex')!==expected)throw Error('Snapshot hash mismatch: '+path);
  if(path.endsWith('.js'))execFileSync(process.execPath,['--check',fileURLToPath(new URL(path,root))],{stdio:'pipe'});
 }
-for(const script of ['check-history.mjs','check-settings.mjs','check-translation.cjs','check-scene.mjs','check-scene-client.cjs','check-scene-sync.mjs']){
+for(const script of ['check-auto-memory.mjs','check-history.mjs','check-settings.mjs','check-translation.cjs','check-scene.mjs','check-scene-client.cjs','check-scene-sync.mjs']){
  execFileSync(process.execPath,[fileURLToPath(new URL(script,import.meta.url))],{stdio:'inherit'});
 }
 const client = await readFile(new URL('dist/dsh-tavern/lib/client.js',root),'utf8');

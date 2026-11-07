@@ -3014,7 +3014,10 @@ function projectScene(items, characterNames, initialNames, override) {
 			const memory = props.play.characterMemories?.[props.character.id];
 			const [entries, setEntries] = (0, react.useState)(() => structuredClone(memory?.book.entries ?? []));
 			const [enabled, setEnabled] = (0, react.useState)(memory?.enabled ?? true);
-			const [sourceId, setSourceId] = (0, react.useState)(void 0);
+			const [autoEnabled, setAutoEnabled] = (0, react.useState)(memory?.autoReview?.enabled ?? false);
+            const [interval, setInterval] = (0, react.useState)(String(memory?.autoReview?.interval ?? 5));
+            const [dismissAutomaticIds, setDismissAutomaticIds] = (0, react.useState)([]);
+            const [sourceId, setSourceId] = (0, react.useState)(void 0);
 			const [saving, setSaving] = (0, react.useState)(false);
 			const [notice, setNotice] = (0, react.useState)("");
 			const busy = saving || props.running;
@@ -3028,6 +3031,8 @@ function projectScene(items, characterNames, initialNames, override) {
 					await props.api.updateCharacterMemory(props.play.id, props.character.id, {
 						name: memory?.name ?? props.character.card.data.name + "·经历",
 						book: { ...memory?.book, entries },
+                        autoReview: { enabled: autoEnabled, interval: Number(interval) },
+                        dismissAutomaticIds,
 						enabled,
 						expectedUpdatedAt: props.play.updatedAt
 					});
@@ -3044,6 +3049,17 @@ function projectScene(items, characterNames, initialNames, override) {
 					(0, react_jsx_runtime.jsx)("p", { children: "仅用于本会话及该角色；主持者可参考，其他角色不会自动获知。过去经历、当前状态和待发生约定请分别说明。" }),
 					memory?.suspended && (0, react_jsx_runtime.jsx)("p", { role: "status", children: "当前剧情分支与这份经历的来源不同，已暂停生效。核对内容后可重新保存启用。" }),
 					(0, react_jsx_runtime.jsx)(Checkbox, { label: "启用本角色经历", checked: enabled, onChange: setEnabled }),
+                    (0, react_jsx_runtime.jsx)(Checkbox, { label: "随正常回复自动检查经历", checked: autoEnabled, onChange: setAutoEnabled }),
+                    (0, react_jsx_runtime.jsx)(Field, { label: "检查间隔（2–50 轮，一问一答算一轮）", children: (0, react_jsx_runtime.jsx)(TextInput, { value: interval, onChange: setInterval }) }),
+                    (0, react_jsx_runtime.jsx)("p", { children: "每达到间隔，在下一次正常回复时检查此前已完成的对话；没有新事实就不添加。不单独发起生成请求，工具交互仍消耗令牌。自动经历与手动条目分开，保存后生效。" }),
+                    memory?.autoReview?.checkedAt && (0, react_jsx_runtime.jsx)("p", { children: "最近检查：" + memory.autoReview.checkedAt + "，新增 " + (memory.autoReview.lastAdded ?? 0) + " 条。" }),
+                    ...(memory?.automaticEntries ?? []).filter(entry => !entry.disable && !dismissAutomaticIds.includes(entry.uid)).map(entry => (0, react_jsx_runtime.jsxs)("details", { children: [
+                        (0, react_jsx_runtime.jsx)("summary", { children: entry.comment }),
+                        (0, react_jsx_runtime.jsx)("p", { children: entry.content }),
+                        (0, react_jsx_runtime.jsx)("blockquote", { children: "来源原文：" + entry.evidence.quote }),
+                        (0, react_jsx_runtime.jsx)(Button, { children: "撤回此条（保存后生效）", onClick: () => setDismissAutomaticIds(previous => [...previous, entry.uid]) })
+                    ] }, entry.uid)),
+
 					(0, react_jsx_runtime.jsx)("p", { children: "共 " + entries.length + " 条。常驻条目每轮提供，其余按关键词触发，与世界书共享预算。" }),
 					entries.length === 0 && (0, react_jsx_runtime.jsxs)("div", { children: [
 						(0, react_jsx_runtime.jsx)(Select, { value: sourceId, onChange: setSourceId, placeholder: "选择作为经历素材的世界书", options: props.lorebooks.map(book => ({ value: book.id, label: book.name })) }),
@@ -3190,6 +3206,7 @@ function projectScene(items, characterNames, initialNames, override) {
 			]);
 			const activeHandle = handle !== void 0 && handle.session.sessionId === playSessionId ? handle : void 0;
 			const sessionSnapshot = useSessionSnapshot(activeHandle?.session);
+            (0, react.useEffect)(() => { if (panel === "memories") refresh().catch(e => actions.setError(String(e))); }, [panel, playId, refresh, actions]);
 			const chatSnapshot = useChatSnapshot(activeHandle?.chat);
 			const displaySessionId = activeHandle?.session.sessionId;
 			const reasoningReference = activeHandle?.reference;

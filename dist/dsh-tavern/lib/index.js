@@ -2612,6 +2612,41 @@ function playSceneIds(play) {
 	return ids.filter(id => play.characterIds.includes(id));
 }
 
+
+// Automatic review uses only completed dialogue, never reasoning or an unfinished reply.
+function reviewWindow(events) {
+ let end = -1;
+ for (let i = 0; i < events.length; i++) if (events[i].type === "turn/end") end = i;
+ const prefix = events.slice(0, end + 1);
+ const turns = prefix.filter(e => e.type === "turn/end" && e.data.reason?.kind === "completed").length;
+ const messages = [];
+ let pending = [];
+ for (const e of prefix) {
+  if (e.type === "turn/start") pending = [];
+  const message = e.type === "user/message" ? e.data : e.type === "assistant/message" ? e.data.message : null;
+  if (message) {
+   const text = (message.content ?? []).filter(b => b.type === "text").map(b => b.text).join("");
+   if (text && text !== "[开场] 扮演开始。") pending.push({ id: String(message.id), text });
+  }
+  if (e.type === "turn/end") {
+   if (e.data.reason?.kind === "completed") messages.push(...pending);
+   pending = [];
+  }
+ }
+ messages.splice(0, Math.max(0, messages.length - 40));
+ return { prefix, turns, messages };
+}
+function dueMemoryReviews(play, events) {
+ const window = reviewWindow(events);
+ const due = play.characterIds.filter(id => {
+  const memory = activeCharacterMemory(play, id), auto = memory?.autoReview;
+  if (!auto?.enabled || (memory.automaticEntries?.length ?? 0) >= 100) return false;
+  if (auto.cursor && !memoryMatchesHistory({ source: auto.cursor }, window.prefix)) return false;
+  return window.turns - (auto.checkedTurns ?? window.turns) >= (auto.interval ?? 5);
+ });
+ return { ...window, due };
+}
+
 var TavernSessionRuntime = class {
 	sceneFocus = new Map();
 
@@ -2741,12 +2776,12 @@ var TavernSessionRuntime = class {
 				.map(character => characterWithMemory(current, character));
 			const currentPreset = storage.getPreset(current.presetId);
 			// Tool registration belongs to the running agent's mode.
-			return this.buildDirectorSystem({ ...current, multiAgent: play.multiAgent }, characters, currentPreset, fence);
+			return this.buildDirectorSystem({ ...current, multiAgent: play.multiAgent }, characters, currentPreset, fence) + this.memoryReviewPrompt(current);
 		};
 		const loreContext = this.buildLoreContext(play, fence);
 		await this.deps.ensurePreset();
 		const persisted = await this.persistedSession(sessionId);
-		const setup = this.sessionSetup(persisted.preset ?? "tavern", directorSystem, loreContext, play.multiAgent ? this.speakToolDefinition() : void 0);
+		const setup = this.sessionSetup(persisted.preset ?? "tavern", directorSystem, loreContext, [...(play.multiAgent ? [this.speakToolDefinition()] : []), this.memoryReviewTool()]);
 		const agentOptions = {
 			...model.provider === void 0 ? {} : { provider: model.provider },
 			...model.model === void 0 ? {} : { model: model.model },
@@ -2856,7 +2891,7 @@ var TavernSessionRuntime = class {
 				text: () => system() + "\n\n【思维链语言】当模型生成可显示的思维链时，请用简体中文撰写其中的分析、剧情判断和工具调用计划。人物名、工具名、标识符和原文引语可保留原样。思维链与最终回复分开，最终回复仍按原有的角色和格式要求输出。"
 			});
 			agentCtx.systemPrompt.context(loreContext);
-			if (speakTool !== void 0) agentCtx.tools.register(speakTool);
+			for (const tool of Array.isArray(speakTool) ? speakTool : speakTool ? [speakTool] : []) agentCtx.tools.register(tool);
 		};
 	}
 	/**
@@ -2914,6 +2949,64 @@ var TavernSessionRuntime = class {
 		}
 		return buildClassicSystem(play, characters.filter(character => sceneIds.includes(character.id)), renderWorldInfo([]), preset, fence) + "\n\n" + sceneRule;
 	}
+
+ memoryReviewPrompt(play) {
+  const events = this.directors.get(play.id)?.agent.session.snapshotEvents() ?? [];
+  const review = dueMemoryReviews(play, events);
+  if (!review.due.length) return "";
+  const names = review.due.map(id => ({ id, name: this.deps.storage.getCharacter(id)?.card.data.name,
+   existing: (play.characterMemories[id].automaticEntries ?? []).filter(e => !e.disable).map(e => e.content) }));
+  return "\n\n【本轮附带经历检查】以下角色达到检查间隔，请在正常回复前分别调用 tavern_review_memory 一次；无需新事实时提交空 entries。仅整理下面已完成的对话，不记录当前尚未完成的回复或思维链。只记重要且已发生的事件、明确约定和状态变化；区分待发生约定与已兑现事实。排除闲聊、重复事实、猜测和用户未确认的设想。不得覆盖手动经历或原卡；新变化用时间顺序说明。每个角色只记亲历或明确被告知的信息，其他角色的私事不得归入其记忆。每条须引用来源消息 id 及其原文片段。不要在剧情正文中输出检查报告。\n" + JSON.stringify({ characters: names, completedTurns: review.turns, messages: review.messages });
+ }
+ memoryReviewTool() {
+  return {
+   name: "tavern_review_memory",
+   description: "仅在系统提示要求经历检查时调用；有新事实才添加，没变化提交空数组。只处理已完成对话及指定角色。",
+   parameters: { type: "object", properties: {
+    characterId: { type: "string" },
+    entries: { type: "array", maxItems: 3, items: { type: "object", properties: {
+     content: { type: "string" }, keywords: { type: "array", items: { type: "string" } },
+     messageId: { type: "string" }, quote: { type: "string" }
+    }, required: ["content", "messageId", "quote"], additionalProperties: false } }
+   }, required: ["characterId", "entries"], additionalProperties: false },
+   output: { schema: { type: "object", properties: { added: { type: "number" } }, required: ["added"], additionalProperties: false } },
+   execute: async (args, exec) => {
+    const play = this.deps.storage.listPlays().find(p => p.sessionId === exec.agent?.id);
+    if (!play || this.directors.get(play.id)?.agent !== exec.agent) throw badRequest("仅允许当前会话主持者检查经历");
+    return this.withHistoryChange(play.id, async () => {
+     const current = this.deps.storage.getPlay(play.id);
+     if (current !== play) throw conflict("会话已变化，请下轮检查");
+     const review = dueMemoryReviews(play, exec.agent.session.snapshotEvents());
+     if (!review.due.includes(args.characterId)) throw badRequest("该角色尚未到检查间隔，或记忆已暂停");
+     if (!Array.isArray(args.entries) || args.entries.length > 3) throw badRequest("每次最多记录三条经历");
+     const memory = play.characterMemories[args.characterId];
+     const prior = memory.automaticEntries ?? [];
+     const source = memorySource(review.prefix, play.sessionId);
+     const normalize = text => text.replace(/\s+/g, "").trim();
+     const known = new Set([...memory.book.entries, ...prior].map(e => normalize(e.content)));
+     const added = [];
+     for (const entry of args.entries) {
+      const message = review.messages.find(m => m.id === entry.messageId);
+      if (typeof entry.content !== "string" || !entry.content.trim() || entry.content.length > 1200 ||
+       typeof entry.quote !== "string" || entry.quote.trim().length < 4 || !message?.text.includes(entry.quote)) throw badRequest("经历缺少有效的已完成对话原文依据");
+      const text = entry.content.trim();
+      if (known.has(normalize(text))) continue;
+      if (prior.length + added.length >= 100) throw badRequest("自动经历已达上限，请先整理");
+      known.add(normalize(text));
+      added.push({ uid: newId("memory"), content: text, key: Array.isArray(entry.keywords) ? entry.keywords.filter(k => typeof k === "string" && k.trim()).slice(0, 6).map(k => k.slice(0, 40)) : [],
+       comment: "自动经历 · 第" + review.turns + "轮", constant: true, disable: false, order: 75,
+       source, evidence: { messageId: message.id, quote: entry.quote }, createdAt: nowIso() });
+     }
+     const updatedMemory = { ...memory, automaticEntries: [...prior, ...added],
+      autoReview: { ...memory.autoReview, checkedTurns: review.turns, cursor: source, lastAdded: added.length, checkedAt: nowIso() } };
+     // Dynamic prompt/context reads the new record; never replace an agent during its turn.
+     await this.deps.storage.upsertPlay({ ...play, characterMemories: { ...play.characterMemories, [args.characterId]: updatedMemory }, updatedAt: nowIso() });
+     return { added: added.length };
+    });
+   }
+  };
+ }
+
 	/** Dynamic world-book context for one play's assembly. */
 	buildLoreContext(play, fence, characterId) {
 		return {
@@ -2932,8 +3025,9 @@ var TavernSessionRuntime = class {
 					return [{
 						book: {
 							...memory.book,
-							entries: memory.book.entries.map(entry => ({
-								...entry,
+							entries: [...memory.book.entries, ...(memory.automaticEntries ?? []).filter(entry => !entry.disable && memoryMatchesHistory(entry, this.directors.get(current.id)?.agent.session.snapshotEvents() ?? []))].map((entry, index) => ({
+								...normalizeEntry(entry, index),
+                                uid: index,
 								content: `【${owner}的经历】${entry.content}`
 							}))
 						}
@@ -4695,7 +4789,16 @@ async function tavernHandler(deps, req, res) {
 					if (book.entries.length > 200 || JSON.stringify(book).length > 200000) return sendError(res, 400, "经历内容过长，请分批整理");
 					const events = await runtime.liveEvents(play);
 					const previous = play.characterMemories?.[characterId];
-					const memory = {
+					if (body.autoReview !== void 0 && (typeof body.autoReview?.enabled !== "boolean" || !Number.isInteger(body.autoReview.interval) || body.autoReview.interval < 2 || body.autoReview.interval > 50)) return sendError(res, 400, "检查间隔须为 2 到 50 轮");
+                    const window = reviewWindow(events);
+                    const autoReview = body.autoReview ? {
+                        ...previous?.autoReview, enabled: body.autoReview.enabled, interval: body.autoReview.interval,
+                        ...(!previous?.autoReview?.enabled && body.autoReview.enabled ? { checkedTurns: window.turns, cursor: memorySource(window.prefix, play.sessionId) } : {})
+                    } : previous?.autoReview;
+                    const memory = {
+                        ...previous,
+                        autoReview,
+                        automaticEntries: (previous?.automaticEntries ?? []).map(entry => ({ ...entry, disable: entry.disable || (Array.isArray(body.dismissAutomaticIds) && body.dismissAutomaticIds.includes(entry.uid)) })),
 						enabled: body.enabled,
 						name: typeof body.name === "string" ? body.name.slice(0, 200) : "角色经历",
 						book,
@@ -4710,7 +4813,7 @@ async function tavernHandler(deps, req, res) {
 					if (agent !== void 0 && (agent.status !== "idle" || !sameConversationEvents(agent.session.snapshotEvents(), events))) {
 						return sendError(res, 409, "会话已有新消息，请刷新后保存经历");
 					}
-					await runtime.updatePlaySettings(play, updated);
+					await storage.upsertPlay(updated);
 					return sendJson(res, 200, updated);
 				});
 			}
