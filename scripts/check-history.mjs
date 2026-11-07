@@ -28,7 +28,7 @@ function fixture({failStart=false,failSave=false}={}){
   };
   const rt=new Runtime({logger:{warn(){}},config:{maxSwipeVariants:4},storage});
   const handle = (id,snapshotEvents) => ({dispose:async()=>{disposed++},agent:{
-    id,status:'idle',session:{snapshotEvents},whenIdle:()=>new Promise(()=>{}),
+    id,status:'idle',runMaintenance:job=>job(),session:{snapshotEvents},whenIdle:()=>new Promise(()=>{}),
     followup(){if(failStart) throw Error('queue');replayed++},
   }});
   rt.directors.set(play.id,handle('old',()=>first));
@@ -39,7 +39,7 @@ function fixture({failStart=false,failSave=false}={}){
       return originalHandle;
     }
     newEvents=seed;
-    const h=handle(next.sessionId,()=>newEvents);
+    const h=handle(next.sessionId,()=>seed);
     rt.directors.set(play.id,h);
     return h;
   };
@@ -48,20 +48,20 @@ function fixture({failStart=false,failSave=false}={}){
 {
   const {rt,original,read}=fixture({failStart:true});
   await assert.rejects(rt.reroll(play.id),/queue/);
-  assert.deepEqual(read(),{current:play,branch:original,disposed:2,cleared:0,replayed:0,newEvents:[]});
+  assert.deepEqual(read(),{current:play,branch:original,disposed:1,cleared:0,replayed:0,newEvents:[]});
   assert.equal(rt.directors.get(play.id).agent.id,"old");
 }
 {
   const {rt,original,read}=fixture({failStart:true});
   await assert.rejects(rt.editUserAndRetry(play.id,'u','edited'),/queue/);
-  assert.deepEqual(read(),{current:play,branch:original,disposed:2,cleared:0,replayed:0,newEvents:[]});
+  assert.deepEqual(read(),{current:play,branch:original,disposed:1,cleared:0,replayed:0,newEvents:[]});
 }
 {
   const {rt,original,read}=fixture({failSave:true});
   await assert.rejects(rt.swipe(play.id,'0',1),/disk/);
   assert.equal(read().current,play);
   assert.equal(read().branch,original);
-  assert.equal(read().disposed,2);
+  assert.equal(read().disposed,1);
 }
 {
   const {rt,read}=fixture();
@@ -76,7 +76,9 @@ function fixture({failStart=false,failSave=false}={}){
 {
   const {rt,read}=fixture();
   rt.directors.delete(play.id);
-  rt.liveEvents=async()=>[...first,event(4,'turn/start',{turn:2}),event(5,'user/message',{id:'u2'}),event(6,'turn/end',{turn:2})];
+  const continued=[...first,event(4,'turn/start',{turn:2}),event(5,'user/message',{id:'u2'}),event(6,'turn/end',{turn:2})];
+  rt.liveEvents=async()=>continued;
+  rt.ensureDirector=async()=>{const h={agent:{id:play.sessionId,status:'idle',runMaintenance:job=>job(),session:{snapshotEvents:()=>continued}},dispose:async()=>{throw Error('Must not dispose stale history')}};rt.directors.set(play.id,h);return h};
   await assert.rejects(rt.reroll(play.id),/已有新消息/);
   await assert.rejects(rt.swipe(play.id,'0',1),/已经继续/);
   assert.equal(read().current,play);

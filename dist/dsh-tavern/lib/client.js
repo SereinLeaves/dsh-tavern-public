@@ -936,8 +936,8 @@ function projectScene(items, characterNames, initialNames, override) {
 				return -1;
 			}, [props.messages]);
 			const saveEdit = (0, react.useCallback)((messageId, kind, text) => {
-				if (kind === "user") props.onEditUserRetry(messageId, text);
-				else props.onEditAssistant(messageId, text);
+				if (kind === "user") return props.onEditUserRetry(messageId, text);
+				return props.onEditAssistant(messageId, text);
 			}, [props.onEditUserRetry, props.onEditAssistant]);
 			const inPlaySession = props.activeSessionId !== void 0;
 			const formActions = /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
@@ -1597,9 +1597,8 @@ function projectScene(items, characterNames, initialNames, override) {
 							children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)(Button, {
 								variant: "primary",
 								disabled: props.busy || draft.trim() === "",
-								onClick: () => {
-									if (message.messageId !== void 0) props.onSaveEdit(message.messageId, message.kind, draft.trim());
-									setEditing(false);
+								onClick: async () => {
+                                    if (message.messageId !== void 0 && await props.onSaveEdit(message.messageId, message.kind, draft.trim()) === true) setEditing(false);
 								},
 								children: message.kind === "user" ? "保存并重新生成" : "保存"
 							}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)(Button, {
@@ -3121,14 +3120,22 @@ function projectScene(items, characterNames, initialNames, override) {
 					actions.setError(e instanceof Error ? e.message : String(e));
 				});
 			}, [actions]);
-			const selectPlay = (0, react.useCallback)((id) => {
-				actions.setPlayId(id);
-				actions.setPanel("chat");
-				const playSummary = state?.plays.find((p) => p.id === id);
-				if (playSummary !== void 0) tavernApi.activatePlay(playSummary.id).catch((e) => {
-					actions.setError(e instanceof Error ? e.message : String(e));
-				});
-			}, [actions, state]);
+			const activationRequest = (0, react.useRef)(0);
+            const selectPlay = (0, react.useCallback)(async (id) => {
+                const request = ++activationRequest.current;
+                actions.setError(null);
+                const playSummary = state?.plays.find(play => play.id === id);
+                if (!playSummary) { actions.setError("会话列表已变化，请刷新后重新选择。"); return; }
+                try {
+                    // Do not retain/observe the session until Tavern owns its writer.
+                    await tavernApi.activatePlay(id);
+                    if (request !== activationRequest.current) return;
+                    actions.setPlayId(id);
+                    actions.setPanel("chat");
+                } catch (error) {
+                    if (request === activationRequest.current) actions.setError(error instanceof Error ? error.message : String(error));
+                }
+            }, [actions, state]);
 			const createPlay = (0, react.useCallback)(async (title, characterIds, lorebookIds, presetId, narratorEnabled, multiAgent) => {
 				try {
 					const created = await tavernApi.createPlay({
@@ -3313,11 +3320,14 @@ function projectScene(items, characterNames, initialNames, override) {
 				refresh
 			]);
 			const runBranchOp = (0, react.useCallback)((op) => {
-				if (branching || branchPending.current) return;
+				if (branching || branchPending.current) return Promise.resolve(false);
 				branchPending.current = true;
 				setBranching(true);
 				actions.setError(null);
-				op().then(() => refresh()).catch((e) => actions.setError(e instanceof Error ? e.message : String(e))).finally(() => {
+				return Promise.resolve().then(op).then(async () => { await refresh(); return true; }).catch((e) => {
+                    actions.setError(e instanceof Error ? e.message : String(e));
+                    return false;
+                }).finally(() => {
 					branchPending.current = false;
 					setBranching(false);
 				});
@@ -3347,12 +3357,12 @@ function projectScene(items, characterNames, initialNames, override) {
 				runBranchOp
 			]);
 			const editAssistant = (0, react.useCallback)((messageId, text) => {
-				if (activePlay === null) return;
-				runBranchOp(() => tavernApi.editAssistantMessage(activePlay.id, messageId, text));
+				if (activePlay === null) return Promise.resolve(false);
+				return runBranchOp(() => tavernApi.editAssistantMessage(activePlay.id, messageId, text));
 			}, [activePlay, runBranchOp]);
 			const editUserRetry = (0, react.useCallback)((messageId, text) => {
-				if (activePlay === null) return;
-				runBranchOp(() => tavernApi.editUserMessageAndRetry(activePlay.id, messageId, text));
+				if (activePlay === null) return Promise.resolve(false);
+				return runBranchOp(() => tavernApi.editUserMessageAndRetry(activePlay.id, messageId, text));
 			}, [activePlay, runBranchOp]);
 			const cancelRun = (0, react.useCallback)(() => {
 				if (activeHandle === void 0) return;
@@ -3402,18 +3412,19 @@ function projectScene(items, characterNames, initialNames, override) {
 								})]
 							})]
 						}),
-						error !== null && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
-							className: TavernView_module_css_default.navError,
-							title: error,
-							children: ["⚠ ", error]
-						}),
+
 						!loading && state !== null && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
 							className: TavernView_module_css_default.hint,
 							style: { marginRight: 8 },
 							children: ["会话 ", displaySessionId !== void 0 ? displaySessionId.slice(0, 12) : "（无）"]
 						})
 					]
-				}), loading ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+				}), error !== null && (0, react_jsx_runtime.jsx)("div", {
+                        role: "alert",
+                        className: TavernView_module_css_default.navError,
+                        style: { whiteSpace: "normal", maxWidth: "none", overflow: "visible", flexShrink: 0, padding: "8px 16px", lineHeight: 1.6, overflowWrap: "anywhere" },
+                        children: "⚠ " + error
+                    }), loading ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
 					className: TavernView_module_css_default.content,
 					children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(Empty, { text: "正在加载酒馆…" })
 				}) : state === null ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {

@@ -2242,6 +2242,43 @@ function conflict(message) {
 function badRequest(message) {
 	return new TavernUserError(message, 400);
 }
+
+function transitionRecoveryError(cause, failures) {
+    const error = new Error("操作未完成，且恢复原配置时失败。请暂停编辑和重试，保留当前界面并检查本地日志；不要删除聊天文件。", { cause });
+    error.name = "TavernRecoveryError";
+    error.failures = failures;
+    return error;
+}
+function tavernOperation(seg, method) {
+    if (seg[3] === "messages") {
+        if (seg[4] === "swipe") return "切换回复版本";
+        if (seg[4] === "retry") return "重试回复";
+        return method === "PUT" ? "保存回复编辑" : "修改消息并重试";
+    }
+    if (seg[3] === "memories") return "保存角色经历";
+    if (seg[3] === "enter") return "让角色出场";
+    if (seg[3] === "activate") return "打开酒馆会话";
+    if (seg[1] === "plays") return method === "PUT" ? "保存会话设置" : method === "DELETE" ? "删除酒馆会话" : method === "POST" ? "创建酒馆会话" : "读取酒馆会话";
+    if (seg[1] === "characters") return "保存或读取角色卡";
+    if (seg[1] === "lorebooks") return "保存或读取世界书";
+    if (seg[1] === "presets") return "保存或读取预设";
+    return "酒馆操作";
+}
+function tavernFailure(error) {
+    const name = error?.name, text = String(error?.message ?? error);
+    if (name === "TavernRecoveryError") return { status: 500, reason: error.message };
+    if (name === "SessionAlreadyOwnedError" || /already owned by an active write handle|session\/writer-held/.test(text)) return { status: 409, reason: "会话写入仍被另一个活动实例占用。请等待当前操作结束，再返回酒馆重试；若持续出现，请先保留草稿并正常退出后重开 DSH。不要删除会话锁或聊天文件。" };
+    if (name === "SessionOwnershipLostError" || name === "SessionHandleClosedError") return { status: 409, reason: "当前会话的写入连接已失效。请保留草稿，返回会话列表后重新打开；若仍失败，请正常重开 DSH。" };
+    if (name === "SessionPersistenceNotFoundError") return { status: 404, reason: "关联的聊天日志不存在。请暂停重试并从本地备份核对会话关联，不要新建同名日志覆盖。" };
+    if (name === "SessionFormatUnsupportedError") return { status: 422, reason: "当前 DSH 无法读取这份聊天日志的格式。请使用兼容版本打开，保留原日志，不要覆盖或转换原文件。" };
+    if (name === "SessionPersistenceCorruptionError") return { status: 422, reason: "聊天日志校验未通过，操作已拒绝。请保留原文件并核对本地备份。" };
+    if (error?.code === "ENOSPC" || error?.code === "EDQUOT") return { status: 507, reason: "磁盘空间或存储配额不足，无法保存。请释放空间后再试，并保留未保存的修改。" };
+    if (error?.code === "EACCES" || error?.code === "EPERM") return { status: 403, reason: "没有读取或写入本地资料的权限。请检查 DSH 数据目录的权限，保留未保存修改后再试。" };
+    if (/must declare output|tool .+already registered|invalid tool/i.test(text)) return { status: 500, reason: "插件工具配置不符合当前 DSH 的要求，会话初始化失败。请更新或修复插件后再打开，不要删除聊天记录。" };
+    if (name === "AbortError" || /owner disposed during setup|lifecycle disposed/.test(text)) return { status: 409, reason: "应用或插件正在关闭、重载，操作已中断。请保留修改，待重新加载完成后再试。" };
+    return { status: 500, reason: "插件执行异常，未能完成本次操作。请保留当前修改，并凭错误编号查看本地日志；不要反复重试或删除聊天文件。" };
+}
+
 //#endregion
 //#region src/play.ts
 /**
@@ -2648,6 +2685,39 @@ function dueMemoryReviews(play, events) {
 }
 
 var TavernSessionRuntime = class {
+    // Options belong to the plugin; DSH keeps this object as its live fallback.
+    liveOptions = new WeakMap();
+    retiredHandles = new Set();
+    async retireHandle(handle) {
+        try { await handle.dispose(); this.retiredHandles.delete(handle); }
+        catch (error) { this.retiredHandles.add(handle); this.deps.logger.warn(`tavern: retired agent cleanup failed: ${String(error)}`); }
+    }
+    async attachExisting(agent, system, loreContext, tools) {
+        if (agent.status !== "idle") throw conflict("这份会话正在其他入口输出，请等待完成后再打开酒馆");
+        const cleanup = [];
+        const dispose = async () => {
+            const failures = [];
+            for (const release of [...cleanup].reverse()) try { await release(); } catch (error) { failures.push(error); }
+            if (failures.length) throw transitionRecoveryError(failures[0], failures);
+            cleanup.length = 0;
+        };
+        try {
+            if (typeof agent.runMaintenance !== "function") throw conflict("当前活动会话暂不支持安全接入，请先保留草稿后正常重开 DSH");
+            await agent.runMaintenance(() => this.sessionSetup(void 0, system, loreContext, tools, cleanup)(agent.ctx));
+            return { agent, borrowed: true, dispose };
+        } catch (error) {
+            await dispose();
+            throw error;
+        }
+    }
+    async withIdleAgents(handles, operation, index = 0) {
+        if (index === handles.length) return operation();
+        const agent = handles[index].agent;
+        if (agent.status !== "idle") throw conflict("角色正在输出中，请完成或停止后再操作");
+        if (typeof agent.runMaintenance !== "function") throw conflict("当前会话不支持安全更新，请先保存草稿并重新打开 DSH");
+        return agent.runMaintenance(() => this.withIdleAgents(handles, operation, index + 1));
+    }
+
 	sceneFocus = new Map();
 
 	currentScene(play) {
@@ -2720,7 +2790,7 @@ var TavernSessionRuntime = class {
 	* the old agents against the new ones over the same session ids.
 	*/
 	async dispose() {
-		const handles = [...this.directors.values()];
+		const handles = [...this.directors.values(), ...this.retiredHandles];
 		for (const byPlay of this.roles.values()) handles.push(...byPlay.values());
 		this.directors.clear();
 		this.roles.clear();
@@ -2775,20 +2845,22 @@ var TavernSessionRuntime = class {
 			const characters = current.characterIds.map(id => storage.getCharacter(id)).filter(Boolean)
 				.map(character => characterWithMemory(current, character));
 			const currentPreset = storage.getPreset(current.presetId);
-			// Tool registration belongs to the running agent's mode.
-			return this.buildDirectorSystem({ ...current, multiAgent: play.multiAgent }, characters, currentPreset, fence) + this.memoryReviewPrompt(current);
+			// Mode and prompts are read dynamically; changing settings never releases the writer.
+			return this.buildDirectorSystem(current, characters, currentPreset, fence) + this.memoryReviewPrompt(current);
 		};
 		const loreContext = this.buildLoreContext(play, fence);
 		await this.deps.ensurePreset();
 		const persisted = await this.persistedSession(sessionId);
-		const setup = this.sessionSetup(persisted.preset ?? "tavern", directorSystem, loreContext, [...(play.multiAgent ? [this.speakToolDefinition()] : []), this.memoryReviewTool()]);
+		const setup = this.sessionSetup(persisted.preset ?? "tavern", directorSystem, loreContext, [this.speakToolDefinition(), this.memoryReviewTool()]);
 		const agentOptions = {
 			...model.provider === void 0 ? {} : { provider: model.provider },
 			...model.model === void 0 ? {} : { model: model.model },
 			...model.maxTokens === void 0 ? {} : { maxTokens: model.maxTokens }
 		};
 		let handle;
-		if (persisted.exists) {
+        const existingAgent = this.deps.agents.get?.(sessionId);
+        if (existingAgent) handle = await this.attachExisting(existingAgent, directorSystem, loreContext, [this.speakToolDefinition(), this.memoryReviewTool()]);
+		else if (persisted.exists) {
 			handle = await this.deps.agents.resume({
 				resumeSessionId: sessionId,
 				agentOptions,
@@ -2807,7 +2879,8 @@ var TavernSessionRuntime = class {
 				...seed !== void 0 ? { seed } : {}
 			});
 		}
-		this.directors.set(play.id, handle);
+		this.liveOptions.set(handle.agent, handle.borrowed ? handle.agent.options : agentOptions);
+        this.directors.set(play.id, handle);
 		await this.showInWorkspace(sessionId);
 		return handle;
 	}
@@ -2845,11 +2918,7 @@ var TavernSessionRuntime = class {
 				exists: false,
 				preset: void 0
 			};
-			this.deps.logger.error("tavern: cannot open stored session \"%s\" (%s); assuming it exists", String(sessionId), String(error));
-			return {
-				exists: true,
-				preset: void 0
-			};
+			throw error;
 		}
 		try {
 			const { events } = await handle.read();
@@ -2858,11 +2927,7 @@ var TavernSessionRuntime = class {
 				preset: this.recordedPreset(handle.header, events)
 			};
 		} catch (error) {
-			this.deps.logger.error("tavern: cannot read stored session \"%s\" (%s); assuming it exists", String(sessionId), String(error));
-			return {
-				exists: true,
-				preset: void 0
-			};
+			throw error;
 		} finally {
 			await handle.close().catch(() => {});
 		}
@@ -2877,21 +2942,28 @@ var TavernSessionRuntime = class {
 	* @param loreContext - the world-book dynamic context.
 	* @param speakTool - agent-scoped tool to register, or undefined.
 	*/
-	sessionSetup(presetId, system, loreContext, speakTool) {
+	sessionSetup(presetId, system, loreContext, speakTool, cleanup) {
 		return async (agentCtx) => {
 			if (presetId !== void 0) try {
 				await this.deps.agentPresets.mount(agentCtx, presetId);
 			} catch (error) {
 				this.deps.logger.warn(`tavern: preset "${presetId}" failed to mount (${String(error)}); session runs without it`);
 			}
-			agentCtx.systemPrompt.section({
+            const track = release => { if (cleanup) cleanup.push(release); };
+			track(agentCtx.systemPrompt.section({
 				name: TAVERN_SECTION,
 				order: TAVERN_ORDER,
 				complete: true,
 				text: () => system() + "\n\n【思维链语言】当模型生成可显示的思维链时，请用简体中文撰写其中的分析、剧情判断和工具调用计划。人物名、工具名、标识符和原文引语可保留原样。思维链与最终回复分开，最终回复仍按原有的角色和格式要求输出。"
-			});
-			agentCtx.systemPrompt.context(loreContext);
-			for (const tool of Array.isArray(speakTool) ? speakTool : speakTool ? [speakTool] : []) agentCtx.tools.register(tool);
+			}));
+			track(agentCtx.systemPrompt.context(loreContext));
+			for (const tool of Array.isArray(speakTool) ? speakTool : speakTool ? [speakTool] : []) track(agentCtx.tools.register(tool, {
+                when: ({ agent }) => {
+                    const current = this.deps.storage.listPlays().find(play => play.sessionId === agent.id);
+                    if (!current) return false;
+                    return tool.name === "tavern_speak" ? current.multiAgent === true : dueMemoryReviews(current, agent.session.snapshotEvents()).due.length > 0;
+                }
+            }));
 		};
 	}
 	/**
@@ -2941,6 +3013,7 @@ var TavernSessionRuntime = class {
 				"主持规则：",
 				`- 当剧情需要角色发言时，调用 tavern_speak 工具（参数 characterName=角色名、instruction=你想让角色表达的内容），工具会返回该角色的台词，你直接把它写进回复。`,
 				`- 你可以描写场景、环境、NPC 与旁白（${play.narratorEnabled ? "叙述者功能已启用，请经常描写场景" : "叙述保持克制，以对话为主"}）。`,
+				"- 用户角色是用户扮演的角色，不在「可用角色」列表中；禁止替用户角色发言、行动、写心理，也不要替他做任何决定。你只写在场其他角色的反应与必要的场景过渡。",
 				"- 把角色台词写进回复时，每个角色的发言以「角色名：」开头单独成行（角色名必须在「在场角色」之内）；旁白与场景描写直接输出。",
 				"- 动作与神态描写用 *斜体* 或括号括起。",
 				"- 保持各角色设定一致，不要替角色编造与其性格冲突的发言。"
@@ -3127,6 +3200,7 @@ var TavernSessionRuntime = class {
 		if (director === void 0) throw new Error("tavern_speak: 只能在扮演会话中调用");
 		const play = this.deps.storage.listPlays().find((p) => p.sessionId === director.id);
 		if (play === void 0) throw new Error("tavern_speak: 找不到该会话对应的酒馆配置");
+        if (!play.multiAgent) throw conflict("当前为单 agent 模式，请直接回复，不要调用角色发言工具");
 		const characters = play.characterIds.map((id) => this.deps.storage.getCharacter(id)).filter((c) => c !== void 0);
 		const focusedId = this.sceneFocus.get(play.id)?.characterId;
 		const requested = args.characterId !== void 0 || args.characterName !== void 0;
@@ -3233,7 +3307,9 @@ var TavernSessionRuntime = class {
 			...model.maxTokens === void 0 ? {} : { maxTokens: model.maxTokens }
 		};
 		let handle;
-		if (persisted.exists) {
+        const existingAgent = this.deps.agents.get?.(sessionId);
+        if (existingAgent) handle = await this.attachExisting(existingAgent, system, loreContext);
+		else if (persisted.exists) {
 			handle = await this.deps.agents.resume({
 				resumeSessionId: sessionId,
 				agentOptions,
@@ -3246,7 +3322,8 @@ var TavernSessionRuntime = class {
 			meta: { agentPreset: TAVERN_PRESET_ID },
 			setup
 		});
-		byPlay.set(character.id, handle);
+		this.liveOptions.set(handle.agent, handle.borrowed ? handle.agent.options : agentOptions);
+        byPlay.set(character.id, handle);
 		await this.showInWorkspace(sessionId);
 		return handle;
 	}
@@ -3300,54 +3377,68 @@ var TavernSessionRuntime = class {
 			throw error;
 		}
 	}
-	/** Apply settings to the same durable sessions, restoring the previous settings on failure. */
-	async updatePlaySettings(existing, updated) {
-		const id = existing.id;
-		if (this.rebasing.has(id) || this.directorInflight.has(id) ||
-			[...this.roleInflight.keys()].some(key => key.startsWith(id + ":")) ||
-			this.deps.storage.getPlay(id) !== existing) {
-			throw conflict("酒馆会话正在更新，请刷新后重试");
-		}
-		const handles = [this.directors.get(id), ...this.roles.get(id)?.values() ?? []].filter(Boolean);
-		if (handles.some(handle => handle.agent.status !== "idle")) {
-			throw conflict("角色正在输出中，请完成或停止后再保存设置");
-		}
-		this.rebasing.add(id);
-		try {
-			try {
-				await this.dropPlay(id);
-				await this.deps.storage.upsertPlay(updated);
-				await this.ensureDirector(updated, []);
-			} catch (error) {
-				await this.dropPlay(id).catch(closeError => {
-					this.deps.logger.warn(`tavern: failed to close updated session: ${String(closeError)}`);
-				});
-				await this.deps.storage.upsertPlay(existing);
-				await this.ensureDirector(existing, []).catch(resumeError => {
-					this.deps.logger.warn(`tavern: failed to reopen previous settings: ${String(resumeError)}`);
-				});
-				throw error;
-			}
-			return updated;
-		} finally {
-			this.rebasing.delete(id);
-		}
-	}
+
+    /** Change live prompts/options without releasing the durable session's writer. */
+    async updatePlaySettings(existing, updated) {
+        const id = existing.id;
+        if (this.rebasing.has(id) || this.directorInflight.has(id) ||
+            [...this.roleInflight.keys()].some(key => key.startsWith(id + ":")) ||
+            this.deps.storage.getPlay(id) !== existing) throw conflict("酒馆会话正在更新，请刷新后重试");
+        const handles = [this.directors.get(id), ...this.roles.get(id)?.values() ?? []].filter(Boolean);
+        this.rebasing.add(id);
+        try {
+            return await this.withIdleAgents(handles, async () => {
+                const changingModel = existing.presetId !== updated.presetId;
+                const plans = [];
+                if (changingModel) {
+                    const target = resolveModel(this.deps, this.deps.storage.getPreset(updated.presetId));
+                    if (!target.provider || !target.model) throw badRequest("新预设没有可用模型，请先配置模型供应商");
+                    for (const handle of handles) {
+                        const agent = handle.agent, options = this.liveOptions.get(agent);
+                        if (!options || typeof agent.model?.select !== "function") throw conflict("当前会话暂不能安全切换模型，请保存草稿后重新打开 DSH");
+                        plans.push({ agent, options, before: { ...options }, previous: agent.model.current() ?? resolveModel(this.deps, this.deps.storage.getPreset(existing.presetId)), target });
+                    }
+                }
+                let stored = false;
+                try {
+                    await this.deps.storage.upsertPlay(updated);
+                    stored = true;
+                    for (const plan of plans) {
+                        plan.agent.model.select({ provider: plan.target.provider, model: plan.target.model, ...(plan.target.reasoningEffort ? { reasoningEffort: plan.target.reasoningEffort } : {}) });
+                        if (plan.target.maxTokens === void 0) delete plan.options.maxTokens;
+                        else plan.options.maxTokens = plan.target.maxTokens;
+                    }
+                    return updated;
+                } catch (error) {
+                    const failures = [];
+                    for (const plan of plans) try {
+                        if (plan.previous?.provider && plan.previous?.model) plan.agent.model.select(plan.previous);
+                        Object.keys(plan.options).forEach(key => delete plan.options[key]); Object.assign(plan.options, plan.before);
+                    } catch (restoreError) { failures.push(restoreError); }
+                    if (stored) try { await this.deps.storage.upsertPlay(existing); } catch (restoreError) { failures.push(restoreError); }
+                    if (failures.length) throw transitionRecoveryError(error, failures);
+                    throw error;
+                }
+            });
+        } finally { this.rebasing.delete(id); }
+    }
+
 	/** Drop the live agents of one play (play deleted). */
 	async dropPlay(playId) {
 		const director = this.directors.get(playId);
 		if (director !== void 0) {
-			this.directors.delete(playId);
-			this.speakQueues.delete(String(director.agent.id));
 			await director.dispose();
+            if (this.directors.get(playId) === director) this.directors.delete(playId);
+			this.speakQueues.delete(String(director.agent.id));
 		}
 		const byPlay = this.roles.get(playId);
 		if (byPlay !== void 0) {
-			this.roles.delete(playId);
-			for (const handle of byPlay.values()) {
+			for (const [characterId, handle] of byPlay) {
+                await handle.dispose();
+                byPlay.delete(characterId);
 				this.speakQueues.delete(String(handle.agent.id));
-				await handle.dispose();
 			}
+            if (this.roles.get(playId) === byPlay) this.roles.delete(playId);
 		}
 	}
 	/**
@@ -3358,7 +3449,7 @@ var TavernSessionRuntime = class {
 	*/
 	async liveEvents(play) {
 		const handle = this.directors.get(play.id);
-		if (handle !== void 0) {
+		if (handle !== void 0 && String(handle.agent.id) === play.sessionId) {
 			if (handle.agent.status !== "idle") throw conflict("角色正在输出中，请先停止或等待其完成");
 			return [...handle.agent.session.snapshotEvents()];
 		}
@@ -3384,68 +3475,67 @@ var TavernSessionRuntime = class {
 	* @param seed - a balanced completed-turn event prefix.
 	* @returns the updated play carrying the new session id.
 	*/
-	async rebasePlaySession(play, seed, swipeBranch, sourceEvents, commit) {
-		if (this.rebasing.has(play.id) || this.directorInflight.has(play.id) || this.deps.storage.getPlay(play.id) !== play) {
-			throw conflict("酒馆会话已变化，请刷新后重试");
-		}
-		this.rebasing.add(play.id);
-		try {
-			if (swipeBranch !== void 0) {
-				const events = await this.liveEvents(play);
-				// Recheck the live agent immediately before disposal, after any async read.
-				const agent = this.directors.get(play.id)?.agent;
-				if (this.deps.storage.getPlay(play.id)?.sessionId !== play.sessionId ||
-					this.deps.storage.getSwipeBranch(play.id, swipeBranch.key) !== swipeBranch ||
-					(agent !== void 0 && agent.status !== "idle") ||
-					!sameSwipeHistory(agent?.session.snapshotEvents() ?? events, swipeBranch)) {
-					throw conflict("对话已经继续，无法切换上一轮的回复");
-				}
-			}
-			const old = this.directors.get(play.id);
-			if (sourceEvents !== void 0 && old !== void 0 && (
-				old.agent.status !== "idle" || !sameConversationEvents(old.agent.session.snapshotEvents(), sourceEvents)
-			)) throw conflict("酒馆会话已变化，请刷新后重试");
-			if (old !== void 0) {
-				this.directors.delete(play.id);
-				this.speakQueues.delete(String(old.agent.id));
-				await old.dispose();
-			}
-			const rebased = {
-				...play,
-				...(play.characterMemories ? {
-					characterMemories: Object.fromEntries(Object.entries(play.characterMemories).map(([id, memory]) => [
-						id, { ...memory, suspended: !memoryMatchesHistory(memory, seed) }
-					]))
-				} : {}),
-				sessionId: `tavern-${newId("fork").replace("fork-", "")}`,
-				updatedAt: nowIso()
-			};
-			await this.deps.storage.upsertPlay(rebased);
-			try {
-				await this.ensureDirector(rebased, seed);
-				await commit?.(rebased);
-			} catch (error) {
-				const failed = this.directors.get(play.id);
-				this.directors.delete(play.id);
-				if (failed !== void 0) {
-					this.speakQueues.delete(String(failed.agent.id));
-					await failed.dispose().catch(disposeError => {
-						this.deps.logger.warn(`tavern: failed to close the replacement session: ${String(disposeError)}`);
-					});
-				}
-				await this.deps.storage.upsertPlay(play);
-				if (old !== void 0) {
-					await this.ensureDirector(play, []).catch(resumeError => {
-						this.deps.logger.warn(`tavern: failed to reopen original session: ${String(resumeError)}`);
-					});
-				}
-				throw error;
-			}
-			return rebased;
-		} finally {
-			this.rebasing.delete(play.id);
-		}
-	}
+
+    async rebasePlaySession(play, seed, swipeBranch, sourceEvents, commit) {
+        if (this.rebasing.has(play.id) || this.directorInflight.has(play.id) ||
+            [...this.roleInflight.keys()].some(key => key.startsWith(play.id + ":")) ||
+            this.deps.storage.getPlay(play.id) !== play) throw conflict("酒馆会话已变化，请刷新后重试");
+        // Even a cold history action needs the exact live source Agent under maintenance,
+        // so a background ordinary-Chat writer cannot advance behind our snapshot.
+        const old = this.directors.get(play.id) ?? await this.ensureDirector(play);
+        if (this.deps.storage.getPlay(play.id) !== play) throw conflict("酒馆会话已变化，请刷新后重试");
+        this.rebasing.add(play.id);
+        const handles = [old, ...this.roles.get(play.id)?.values() ?? []].filter(Boolean);
+        try {
+            return await this.withIdleAgents(handles, async () => {
+                const events = old ? [...old.agent.session.snapshotEvents()] : await this.liveEvents(play);
+                if (swipeBranch && (this.deps.storage.getSwipeBranch(play.id, swipeBranch.key) !== swipeBranch || !sameSwipeHistory(events, swipeBranch))) throw conflict("对话已经继续，无法切换上一轮的回复");
+                if (sourceEvents && !sameConversationEvents(events, sourceEvents)) throw conflict("酒馆会话已变化，请刷新后重试");
+                const rebased = {
+                    ...play,
+                    ...(play.characterMemories ? { characterMemories: Object.fromEntries(Object.entries(play.characterMemories).map(([id, memory]) => [id, { ...memory, suspended: !memoryMatchesHistory(memory, seed) }])) } : {}),
+                    sessionId: `tavern-${newId("fork").replace("fork-", "")}`,
+                    updatedAt: nowIso()
+                };
+                let replacement, stored = false;
+                try {
+                    // Keep old agent/registry/writer alive until all fallible work has committed.
+                    // The UI may retain the old session; never ask it to release ownership.
+                    this.directors.delete(play.id);
+                    replacement = await this.ensureDirector(rebased, seed);
+                    const latest = old ? old.agent.session.snapshotEvents() : await this.liveEvents(play);
+                    if (this.deps.storage.getPlay(play.id) !== play || !sameConversationEvents(latest, events)) throw conflict("更新期间收到新消息，已取消切换，请刷新后重试");
+                    await this.deps.storage.upsertPlay(rebased);
+                    stored = true;
+                    // Includes inbox splices: a message queued while the disk write was pending must stay on the old session.
+                    if (old && !sameConversationEvents(old.agent.session.snapshotEvents(), events)) throw conflict("更新期间收到新消息，已取消切换，请刷新后重试");
+                    await commit?.(rebased);
+                    if (old && !sameConversationEvents(old.agent.session.snapshotEvents(), events)) throw conflict("更新期间收到新消息，已取消切换，请刷新后重试");
+                } catch (error) {
+                    const failures = [];
+                    const failed = replacement ?? this.directors.get(play.id);
+                    if (old) this.directors.set(play.id, old); else this.directors.delete(play.id);
+                    if (failed && failed !== old) await this.retireHandle(failed);
+                    if (stored) try { await this.deps.storage.upsertPlay(play); } catch (restoreError) { failures.push(restoreError); }
+                    if (swipeBranch && this.deps.storage.getSwipeBranch(play.id, swipeBranch.key) !== swipeBranch) try { await this.deps.storage.upsertSwipeBranch(swipeBranch); } catch (restoreError) { failures.push(restoreError); }
+                    if (failures.length) throw transitionRecoveryError(error, failures);
+                    throw error;
+                }
+                // Disposal cannot be awaited inside old.runMaintenance (it waits for maintenance).
+                if (old) this.retiredHandles.add(old);
+                return rebased;
+            });
+        } finally {
+            this.rebasing.delete(play.id);
+            // Maintenance has settled; cleanup failure never undoes a committed branch.
+            if (old && this.directors.get(play.id) !== old && this.retiredHandles.has(old)) {
+                if (old.agent.status !== "idle" || old.agent.inbox?.hasPending) {
+                    this.deps.logger.warn("tavern: original session received input at the switch boundary; keeping its writer and history alive");
+                } else await this.retireHandle(old);
+            }
+        }
+    }
+
 	/**
 	* Plan a retry of the last assistant turn: the balanced prefix before the
 	* question turn, the question text to replay, and the current tail.
@@ -3530,8 +3620,10 @@ var TavernSessionRuntime = class {
 				branch
 			};
 		} catch (error) {
-			if (existing !== void 0) await this.deps.storage.upsertSwipeBranch(existing);
-			else await this.deps.storage.deleteSwipeBranch(playId, key);
+			try {
+                if (existing !== void 0) await this.deps.storage.upsertSwipeBranch(existing);
+                else await this.deps.storage.deleteSwipeBranch(playId, key);
+            } catch (restoreError) { throw transitionRecoveryError(error, [restoreError]); }
 			throw error;
 		}
 	}
@@ -4809,7 +4901,7 @@ async function tavernHandler(deps, req, res) {
 					};
 					const updated = { ...play, characterMemories: { ...play.characterMemories, [characterId]: memory }, updatedAt: nowIso() };
 					// A queued message between reading the history and replacing agents must not be lost.
-					const agent = runtime.getDirector(play.id)?.agent;
+					const agent = runtime.getDirector(play.id);
 					if (agent !== void 0 && (agent.status !== "idle" || !sameConversationEvents(agent.session.snapshotEvents(), events))) {
 						return sendError(res, 409, "会话已有新消息，请刷新后保存经历");
 					}
@@ -4885,10 +4977,13 @@ async function tavernHandler(deps, req, res) {
 		}
 		return sendError(res, 404, "未知接口");
 	} catch (error) {
-		if (error instanceof TavernUserError) return sendError(res, error.status, error.message);
-		if (error instanceof SyntaxError) return sendError(res, 400, `JSON 格式错误：${error.message}`);
-		deps.logger.warn(`tavern api error: ${String(error)}`);
-		return sendError(res, 500, "服务器内部错误：" + (error instanceof Error ? error.message : String(error)));
+		const operation = tavernOperation(seg, method);
+        if (error instanceof TavernUserError) return sendError(res, error.status, `${operation}失败：${error.message}`);
+        if (error instanceof SyntaxError) return sendError(res, 400, `${operation}失败：请求内容不是有效 JSON，请检查导入文件或刷新后重试。`);
+        const reference = crypto.randomUUID().slice(0, 8);
+        deps.logger.warn(`tavern api error [${reference}] ${operation}: ${String(error)}; cause=${String(error?.cause ?? "")}; recovery=${String(error?.failures ?? "")}`);
+        const failure = tavernFailure(error);
+        return sendError(res, failure.status, `${operation}失败：${failure.reason}（错误编号 ${reference}）`);
 	}
 }
 //#endregion

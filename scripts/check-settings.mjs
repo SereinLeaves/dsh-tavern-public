@@ -17,9 +17,15 @@ try{
  await storage.upsertPlay(original);
  const branch={playId:original.id,key:'0',variants:[],current:0};
  await storage.upsertSwipeBranch(branch);
- const rt=new Runtime({storage,logger});
+ const rt=new Runtime({storage,logger,defaultModel:()=>({provider:"fixture",model:"default-model"})});
  let resumed=[],disposed=[],rejectLoad=false,busy=false;
- const handle=id=>({agent:{id,status:busy?'running':'idle'},dispose:async()=>{disposed.push(id)}});
+ const selections=[];
+ const handle=id=>{
+  let selection={provider:'fixture',model:'new-model'};
+  const agent={id,status:busy?'running':'idle',runMaintenance:job=>job(),model:{current:()=>selection,select(next){if(rejectLoad && next.model==='new-model') throw Error('simulated model selection failure');selection=next;selections.push(next)}}};
+  rt.liveOptions.set(agent,{maxTokens:800});
+  return {agent,dispose:async()=>{disposed.push(id)}};
+ };
  rt.directors.set(original.id,handle(original.sessionId));
  rt.roles.set(original.id,new Map([['role-one',handle('retained-role-log')]]));
  rt.createDirector=async play=>{
@@ -51,20 +57,21 @@ try{
  assert.equal(updated.result.sessionId,original.sessionId);
  assert.equal(updated.result.presetId,undefined);
  assert.deepEqual(updated.result.characterIds,['role-two']);
- assert.deepEqual(disposed,['same-session','retained-role-log']);
+ assert.deepEqual(disposed,[]);
  assert.equal(storage.getSwipeBranch(original.id,'0'),branch);
  assert.ok(storage.getCharacter('role-one'));
- assert.deepEqual(resumed[0],storage.getPlay(original.id));
+ assert.equal(resumed.length,0);
+ assert.equal(selections.length,2);
  const before=storage.getPlay(original.id);
  rejectLoad=true;
  const failed=await request({title:'Bad load',presetId:'preset-new',expectedUpdatedAt:before.updatedAt});
  assert.equal(failed.status,500);
  assert.equal(storage.getPlay(original.id),before);
- assert.equal(resumed.at(-1),before);
+ assert.equal(resumed.length,0);
  assert.equal(rt.directors.get(original.id).agent.id,original.sessionId);
  assert.equal(rt.rebasing.size,0);
  assert.equal(rt.changingHistory.size,0);
  const reopened=await LibraryStore.open(root,logger);
  assert.deepEqual(reopened.play(original.id),before);
- console.log('PASS settings route, validation, busy and stale saves, same-session reload, removed-role preservation, branch preservation, reload failure rollback, disk read-back.');
+ console.log('PASS settings route, validation, busy and stale saves, same-session live update, removed-role preservation, branch preservation, model-selection failure rollback, disk read-back.');
 }finally{await rm(root,{recursive:true,force:true})}
