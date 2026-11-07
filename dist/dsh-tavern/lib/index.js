@@ -2530,7 +2530,13 @@ function characterWithMemory(play, character) {
 	return { ...character, card: { ...character.card, data } };
 }
 
+function playSceneIds(play) {
+	const ids = play.sceneCharacterIds ?? play.characterIds.slice(0, 1);
+	return ids.filter(id => play.characterIds.includes(id));
+}
+
 var TavernSessionRuntime = class {
+	sceneFocus = new Map();
 	rebasing = new Set();
 	changingHistory = new Set();
 
@@ -2766,12 +2772,19 @@ var TavernSessionRuntime = class {
 	}
 	/** Compose the director's system prompt. */
 	buildDirectorSystem(play, characters, preset, fence) {
+		const sceneIds = playSceneIds(play);
+		const sceneNames = characters.filter(character => sceneIds.includes(character.id)).map(character => neutralizeDelimiters(character.card.data.name));
+		const focusedId = this.sceneFocus.get(play.id)?.characterId;
+		const focusedName = characters.find(character => character.id === focusedId)?.card.data.name;
+		const sceneRule = `当前场景在场角色：${sceneNames.join("、") || "暂无角色"}。会话角色库中的其他角色尚未出场，不得擅自代其发言或让其获知场内私事。` +
+			(focusedName ? `本轮由用户点名 ${neutralizeDelimiters(focusedName)} 出场或接话，只生成此角色的一段回应及必要场景过渡，然后等待用户。` : "");
 		if (play.multiAgent) {
 			const parts = [];
 			parts.push("你是一场角色扮演（roleplay）的主持者（director）。");
 			parts.push(fence.contract);
 			const names = play.characterIds.map((id) => characters.find((c) => c.id === id)?.card.data.name).filter((name) => name !== void 0).map((name) => neutralizeDelimiters(stripPromptVariables(name)));
-			if (names.length > 0) parts.push(`在场角色：${names.join("、")}`);
+			if (names.length > 0) parts.push(`可用角色：${names.join("、")}`);
+			parts.push(sceneRule);
 			for (const character of characters) {
 				const data = character.card.data;
 				parts.push(`【角色 ${neutralizeDelimiters(stripPromptVariables(data.name))}】`);
@@ -2792,7 +2805,7 @@ var TavernSessionRuntime = class {
 			].join("\n"));
 			return parts.join("\n\n");
 		}
-		return buildClassicSystem(play, characters, renderWorldInfo([]), preset, fence);
+		return buildClassicSystem(play, characters.filter(character => sceneIds.includes(character.id)), renderWorldInfo([]), preset, fence) + "\n\n" + sceneRule;
 	}
 	/** Dynamic world-book context for one play's assembly. */
 	buildLoreContext(play, fence, characterId) {
@@ -2914,7 +2927,13 @@ var TavernSessionRuntime = class {
 		const play = this.deps.storage.listPlays().find((p) => p.sessionId === director.id);
 		if (play === void 0) throw new Error("tavern_speak: 找不到该会话对应的酒馆配置");
 		const characters = play.characterIds.map((id) => this.deps.storage.getCharacter(id)).filter((c) => c !== void 0);
-		const target = characters.find((c) => args.characterId !== void 0 && c.id === args.characterId || args.characterName !== void 0 && c.card.data.name === args.characterName) ?? characters[0];
+		const focusedId = this.sceneFocus.get(play.id)?.characterId;
+		const requested = args.characterId !== void 0 || args.characterName !== void 0;
+		const target = requested
+			? characters.find(character => character.id === args.characterId || character.card.data.name === args.characterName)
+			: characters.find(character => character.id === (focusedId ?? playSceneIds(play)[0]));
+		if (!target || !playSceneIds(play).includes(target.id)) throw conflict("该角色尚未出场，请先点击角色头像");
+		if (focusedId !== void 0 && target.id !== focusedId) throw conflict("本轮请由用户点名的角色回应");
 		if (target === void 0) throw new Error("tavern_speak: 角色列表为空");
 		const instruction = args.instruction ?? `请以${target.card.data.name}的身份说下一句台词。`;
 		const handle = await this.ensureRoleAgent(play, target);
@@ -3029,6 +3048,45 @@ var TavernSessionRuntime = class {
 		byPlay.set(character.id, handle);
 		await this.showInWorkspace(sessionId);
 		return handle;
+	}
+	/** Clicking a portrait explicitly requests one generation from this character. */
+	async enterCharacter(playId, characterId, expectedUpdatedAt) {
+		const storage = this.deps.storage;
+		const play = storage.getPlay(playId);
+		if (!play) throw notFound("酒馆会话不存在");
+		const character = storage.getCharacter(characterId);
+		if (!character || !play.characterIds.includes(characterId)) throw badRequest("角色不属于当前会话");
+		if (play.updatedAt !== expectedUpdatedAt) throw conflict("会话已变化，请刷新后再点角色头像");
+		if (this.rebasing.has(playId) || this.sceneFocus.has(playId)) throw conflict("角色正在回应，请稍候");
+		const handle = await this.ensureDirector(play);
+		const busy = () => handle.agent.status !== "idle" ||
+			[...this.roles.get(playId)?.values() ?? []].some(role => role.agent.status !== "idle");
+		if (busy() || storage.getPlay(playId) !== play) throw conflict("角色正在回应或会话已变化，请稍候");
+		const present = playSceneIds(play);
+		const updated = { ...play, sceneCharacterIds: [...new Set([...present, characterId])], updatedAt: nowIso() };
+		const focus = { characterId };
+		this.sceneFocus.set(playId, focus);
+		try {
+			await storage.upsertPlay(updated);
+			if (busy() || storage.getPlay(playId) !== updated) throw conflict("会话已有新消息，请稍候再点头像");
+			const done = handle.agent.whenIdle();
+			// Attach both outcomes before followup, including synchronous enqueue failure.
+			done.then(() => {
+				if (this.sceneFocus.get(playId) === focus) this.sceneFocus.delete(playId);
+			}, error => {
+				if (this.sceneFocus.get(playId) === focus) this.sceneFocus.delete(playId);
+				this.deps.logger.warn(`tavern: character entrance failed: ${String(error)}`);
+			});
+			const name = neutralizeDelimiters(stripPromptVariables(character.card.data.name));
+			handle.agent.followup(userMessage(present.includes(characterId)
+				? `【指定角色接话】请由${name}根据当前场景自然回应一段，其他角色本轮不接话，随后等待我。`
+				: `【指定角色出场】请让${name}合理进入当前场景并回应一段。该角色只知道其亲历或被告知的事，其他角色本轮不接话，随后等待我。`));
+			return updated;
+		} catch (error) {
+			if (this.sceneFocus.get(playId) === focus) this.sceneFocus.delete(playId);
+			if (storage.getPlay(playId) === updated) await storage.upsertPlay(play);
+			throw error;
+		}
 	}
 	/** Apply settings to the same durable sessions, restoring the previous settings on failure. */
 	async updatePlaySettings(existing, updated) {
@@ -4197,6 +4255,7 @@ async function tavernHandler(deps, req, res) {
 					lorebookIds: playLorebookIds(play),
 					presetId: play.presetId,
 					characterMemories: play.characterMemories ?? {},
+					sceneCharacterIds: playSceneIds(play),
 					narratorEnabled: play.narratorEnabled,
 					multiAgent: play.multiAgent,
 					sessionId: play.sessionId,
@@ -4492,6 +4551,12 @@ async function tavernHandler(deps, req, res) {
 				const body = await readJsonBody(req);
 				if (typeof body?.text !== "string") return sendError(res, 400, "缺少修改后的内容");
 				return sendJson(res, 200, { play: await runtime.withHistoryChange(seg[2], () => runtime.editAssistant(seg[2], seg[4], body.text)) });
+			}
+			if (seg.length === 4 && seg[3] === "enter" && method === "POST") {
+				const body = await readJsonBody(req);
+				if (typeof body?.characterId !== "string" || typeof body?.expectedUpdatedAt !== "string") return sendError(res, 400, "需要角色与会话版本");
+				const play = await runtime.withHistoryChange(seg[2], () => runtime.enterCharacter(seg[2], body.characterId, body.expectedUpdatedAt));
+				return sendJson(res, 200, play);
 			}
 			if (seg.length === 5 && seg[3] === "memories" && method === "PUT") {
 				const body = await readJsonBody(req);

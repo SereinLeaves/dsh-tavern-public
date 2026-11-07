@@ -9,7 +9,10 @@ for(const [path,expected] of Object.entries(manifest.files)){
  if(createHash('sha256').update(bytes).digest('hex')!==expected)throw Error('Snapshot hash mismatch: '+path);
  if(path.endsWith('.js'))execFileSync(process.execPath,['--check',fileURLToPath(new URL(path,root))],{stdio:'pipe'});
 }
-for(const script of ['check-history.mjs','check-settings.mjs','check-translation.cjs']){
+for(const script of ['check-history.mjs','check-settings.mjs','check-translation.cjs','check-scene.mjs','check-scene-client.cjs']){
  execFileSync(process.execPath,[fileURLToPath(new URL(script,import.meta.url))],{stdio:'inherit'});
 }
+const client = await readFile(new URL('dist/dsh-tavern/lib/client.js',root),'utf8');
+const fixture = await readFile(new URL('scripts/scene-client.fixture.js',root),'utf8');
+if (!client.includes(fixture.trimEnd())) throw Error('Avatar component fixture differs from installed code');
 console.log('PASS installed snapshot checksums, JavaScript syntax, history/settings/translation regressions.');

@@ -1,0 +1,25 @@
+const fs=require('node:fs'),assert=require('node:assert/strict');
+const code=fs.readFileSync(__dirname+'/scene-client.fixture.js','utf8');
+const jsx=(type,props)=>({type,props});
+let hooks=[],cursor=0;
+const react={useState(initial){const i=cursor++;if(!(i in hooks))hooks[i]=initial;return[hooks[i],v=>hooks[i]=v]},useEffect(){}};
+const {SceneRail,CharacterAvatar}=Function('react','react_jsx_runtime','avatarSrc','firstGrapheme',code+'\nreturn {SceneRail,CharacterAvatar}')(
+ react,{jsx,jsxs:jsx},x=>'/'+x,s=>s[0]);
+const clicks=[];
+const props={play:{characterIds:['a','b']},characters:[{id:'a',name:'Alice',avatar:'alice.png'},{id:'b',name:'Bea',avatar:'bea.png'}],busy:false,onEnter:id=>clicks.push(id)};
+let rail=SceneRail(props);
+const buttons=rail.props.children.filter(n=>n?.type==='button');
+assert.equal(buttons.length,2);
+assert.match(buttons[0].props['aria-label'],/在场/);
+assert.match(buttons[1].props['aria-label'],/未出场/);
+assert.equal(buttons[1].props.children[0].props.src,'bea.png');
+buttons[1].props.onClick();
+assert.deepEqual(clicks,['b']);
+assert.ok(SceneRail({...props,busy:true}).props.children.filter(n=>n?.type==='button').every(n=>n.props.disabled));
+cursor=0;
+let avatar=CharacterAvatar({src:'bea.png',name:'Bea'});
+assert.equal(avatar.props.children.props.src,'/bea.png');
+avatar.props.children.props.onError();
+cursor=0;
+assert.equal(CharacterAvatar({src:'bea.png',name:'Bea'}).props.children.props.children,'B');
+console.log('PASS separate portrait per character, scene labels, click target, busy disable, failed image fallback.');
