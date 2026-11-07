@@ -20,6 +20,8 @@ try {
  const agent={id:play.sessionId,session:{snapshotEvents:()=>events}};
  rt.directors.set(play.id,{agent});
  const tool=rt.memoryReviewTool();
+ assert.equal(typeof tool.output.render,"function");
+ assert.equal(tool.output.render({}, {added:0})[0].type,"text");
  for(let n=1;n<=4;n++)turn(n);
  assert.deepEqual(dueMemoryReviews(play,events).due,[]);
  await assert.rejects(tool.execute({characterId:'role-a',entries:[]},{agent}));

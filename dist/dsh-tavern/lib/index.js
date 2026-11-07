@@ -2969,7 +2969,7 @@ var TavernSessionRuntime = class {
      messageId: { type: "string" }, quote: { type: "string" }
     }, required: ["content", "messageId", "quote"], additionalProperties: false } }
    }, required: ["characterId", "entries"], additionalProperties: false },
-   output: { schema: { type: "object", properties: { added: { type: "number" } }, required: ["added"], additionalProperties: false } },
+   output: { schema: { type: "object", properties: { added: { type: "number" } }, required: ["added"], additionalProperties: false }, render: (_args, value) => [{ type: "text", text: value.added ? "经历检查完成，新增 " + value.added + " 条。" : "经历检查完成，无需新增。" }] },
    execute: async (args, exec) => {
     const play = this.deps.storage.listPlays().find(p => p.sessionId === exec.agent?.id);
     if (!play || this.directors.get(play.id)?.agent !== exec.agent) throw badRequest("仅允许当前会话主持者检查经历");
