@@ -2530,6 +2530,83 @@ function characterWithMemory(play, character) {
 	return { ...character, card: { ...character.card, data } };
 }
 
+// Scene headers describe presence. Explicit speaker prefixes describe who is speaking.
+function namesInSceneHeader(text, characterNames, streaming = false) {
+	const lines = text.slice(0, 1600).split(/\r?\n/);
+	for (let index = 0; index < Math.min(lines.length, 4); index++) {
+		const line = lines[index].replace(/[*_]/g, "");
+		if (!/^\s*(?:#{1,6}\s*)?【(?:时间|地点|在场人物|在场角色)】/.test(line)) continue;
+		const header = /【在场(?:人物|角色)】\s*[:：]?\s*(.*)/.exec(line);
+		if (!header || (streaming && index === lines.length - 1)) continue;
+		return characterNames.filter(name => {
+			const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+			return new RegExp("(?:^|[、，,;；|/\\s])" + escaped + "(?=$|[、，,;；|/\\s（(])").test(header[1]);
+		});
+	}
+	return null;
+}
+function sceneCue(text, characterNames) {
+	const entering = [], leaving = [];
+	for (const name of characterNames) {
+		const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+		const start = "(?:^|[，,。；;\\n])\\s*(?:(?:请|让|换成|改为|接下来|现在)\\s*)*" + escaped + "\\s*";
+		if (new RegExp(start + "(?:出场|上场|进来|接话|说话)(?=$|[，,。！!\\s])").test(text)) entering.push(name);
+		if (new RegExp(start + "(?:放一边|先放一边|退场|离开|先不出场)(?=$|[，,。！!\\s])").test(text)) leaving.push(name);
+	}
+	return { entering, leaving };
+}
+function projectScene(items, characterNames, initialNames, override) {
+	let presentNames = [...initialNames];
+	let activeNames = [...presentNames];
+	if (override && !override.afterMessageId) {
+		presentNames = override.names.filter(name => characterNames.includes(name));
+		activeNames = override.activeName ? [override.activeName] : [...presentNames];
+	}
+	const rows = items.map(item => {
+		if (item.kind === "user") {
+			const cue = sceneCue(item.text, characterNames);
+			if (cue.entering.length || cue.leaving.length) {
+				presentNames = [...new Set([...presentNames.filter(name => !cue.leaving.includes(name)), ...cue.entering])];
+				activeNames = cue.entering.length ? cue.entering : activeNames.filter(name => presentNames.includes(name));
+			}
+			return item;
+		}
+		const header = namesInSceneHeader(item.text, characterNames, item.status === "streaming");
+		if (header !== null) {
+			presentNames = header;
+			activeNames = [...header];
+		}
+		const prefixedNames = item.text.split("\n").flatMap(line => {
+			const match = /^\s*([^：:\n]{1,40})[：:]/.exec(line.replace(/[*_]/g, ""));
+			const name = match?.[1].trim();
+			return characterNames.includes(name) ? [name] : [];
+		});
+		for (const name of prefixedNames) {
+			if (!presentNames.includes(name)) presentNames.push(name);
+		}
+		if (prefixedNames.length) activeNames = [prefixedNames.at(-1)];
+		const speaker = characterNames.includes(item.name) ? item.name : void 0;
+		if (speaker !== void 0) {
+			if (!presentNames.includes(speaker)) presentNames = [...presentNames, speaker];
+			activeNames = [speaker];
+		}
+		const labelNames = speaker ? [speaker] : [...activeNames];
+		const row = {
+			...item,
+			name: labelNames.join(" · ") || "场景",
+			speakerNames: labelNames
+		};
+		// Apply a portrait click after its source reply, without relabeling that reply.
+		if (override?.afterMessageId && item.messageId === override.afterMessageId) {
+			presentNames = override.names.filter(name => characterNames.includes(name));
+			activeNames = override.activeName && presentNames.includes(override.activeName)
+				? [override.activeName] : [...presentNames];
+		}
+		return row;
+	});
+	return { rows, presentNames, activeNames };
+}
+
 function playSceneIds(play) {
 	const ids = play.sceneCharacterIds ?? play.characterIds.slice(0, 1);
 	return ids.filter(id => play.characterIds.includes(id));
@@ -2537,6 +2614,36 @@ function playSceneIds(play) {
 
 var TavernSessionRuntime = class {
 	sceneFocus = new Map();
+
+	currentScene(play) {
+		const characters = play.characterIds.map(id => this.deps.storage.getCharacter(id)).filter(Boolean);
+		const nameFor = id => characters.find(character => character.id === id)?.card.data.name;
+		const events = this.directors.get(play.id)?.agent.session.snapshotEvents() ?? [];
+		const items = events.filter(event => event.type === "assistant/message" || event.type === "user/message").map(event => {
+			const message = event.type === "assistant/message" ? event.data.message : event.data;
+			return {
+				kind: event.type === "user/message" ? "user" : "assistant",
+				text: message.content.filter(block => block.type === "text").map(block => block.text).join(""),
+				messageId: String(message.id)
+			};
+		});
+		const override = play.sceneOverride;
+		const projected = projectScene(items, characters.map(character => character.card.data.name),
+			play.characterIds.slice(0, 1).map(nameFor).filter(Boolean),
+			override ? {
+				afterMessageId: override.afterMessageId,
+				names: override.characterIds.map(nameFor).filter(Boolean),
+				activeName: nameFor(override.activeCharacterId)
+			} : void 0);
+		const idsFor = names => characters.filter(character => names.includes(character.card.data.name)).map(character => character.id);
+		const focus = this.sceneFocus.get(play.id)?.characterId;
+		const characterIds = idsFor(projected.presentNames);
+		if (focus && !characterIds.includes(focus)) characterIds.push(focus);
+		return {
+			characterIds,
+			activeCharacterIds: focus ? [focus] : idsFor(projected.activeNames)
+		};
+	}
 	rebasing = new Set();
 	changingHistory = new Set();
 
@@ -2772,7 +2879,7 @@ var TavernSessionRuntime = class {
 	}
 	/** Compose the director's system prompt. */
 	buildDirectorSystem(play, characters, preset, fence) {
-		const sceneIds = playSceneIds(play);
+		const sceneIds = this.currentScene(play).characterIds;
 		const sceneNames = characters.filter(character => sceneIds.includes(character.id)).map(character => neutralizeDelimiters(character.card.data.name));
 		const focusedId = this.sceneFocus.get(play.id)?.characterId;
 		const focusedName = characters.find(character => character.id === focusedId)?.card.data.name;
@@ -2931,8 +3038,8 @@ var TavernSessionRuntime = class {
 		const requested = args.characterId !== void 0 || args.characterName !== void 0;
 		const target = requested
 			? characters.find(character => character.id === args.characterId || character.card.data.name === args.characterName)
-			: characters.find(character => character.id === (focusedId ?? playSceneIds(play)[0]));
-		if (!target || !playSceneIds(play).includes(target.id)) throw conflict("该角色尚未出场，请先点击角色头像");
+			: characters.find(character => character.id === (focusedId ?? this.currentScene(play).activeCharacterIds[0]));
+		if (!target || !this.currentScene(play).characterIds.includes(target.id)) throw conflict("该角色尚未出场，请先点击角色头像");
 		if (focusedId !== void 0 && target.id !== focusedId) throw conflict("本轮请由用户点名的角色回应");
 		if (target === void 0) throw new Error("tavern_speak: 角色列表为空");
 		const instruction = args.instruction ?? `请以${target.card.data.name}的身份说下一句台词。`;
@@ -3062,8 +3169,19 @@ var TavernSessionRuntime = class {
 		const busy = () => handle.agent.status !== "idle" ||
 			[...this.roles.get(playId)?.values() ?? []].some(role => role.agent.status !== "idle");
 		if (busy() || storage.getPlay(playId) !== play) throw conflict("角色正在回应或会话已变化，请稍候");
-		const present = playSceneIds(play);
-		const updated = { ...play, sceneCharacterIds: [...new Set([...present, characterId])], updatedAt: nowIso() };
+		const present = this.currentScene(play).characterIds;
+		const lastReply = [...handle.agent.session.snapshotEvents()].reverse().find(event => event.type === "assistant/message");
+		const sceneCharacterIds = [...new Set([...present, characterId])];
+		const updated = {
+			...play,
+			sceneCharacterIds,
+			sceneOverride: {
+				afterMessageId: lastReply ? String(lastReply.data.message.id) : void 0,
+				characterIds: sceneCharacterIds,
+				activeCharacterId: characterId
+			},
+			updatedAt: nowIso()
+		};
 		const focus = { characterId };
 		this.sceneFocus.set(playId, focus);
 		try {
@@ -4255,7 +4373,9 @@ async function tavernHandler(deps, req, res) {
 					lorebookIds: playLorebookIds(play),
 					presetId: play.presetId,
 					characterMemories: play.characterMemories ?? {},
-					sceneCharacterIds: playSceneIds(play),
+					sceneCharacterIds: runtime.currentScene(play).characterIds,
+					activeCharacterIds: runtime.currentScene(play).activeCharacterIds,
+					sceneOverride: play.sceneOverride,
 					narratorEnabled: play.narratorEnabled,
 					multiAgent: play.multiAgent,
 					sessionId: play.sessionId,
