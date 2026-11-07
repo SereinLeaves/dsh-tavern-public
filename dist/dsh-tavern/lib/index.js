@@ -2195,7 +2195,14 @@ const TAVERN_PRESET_DEFINITION = {
 			complete: false,
 			includeRuntimeContext: true
 		}
-	}]
+	}, {
+        id: "compaction", name: "cordis:group", group: true,
+        isolate: { compaction: true },
+        config: [
+            { id: "compaction-basic", name: "@deepseek-ai/dsh-compaction-basic", config: { auto: true, thresholdRatio: 0.2, retainRatio: 0.05, headroomTokens: 8192, maxTokens: 4096, maxOverflowRetries: 1 } },
+            { id: "command-compact", name: "@deepseek-ai/dsh-command-compact" }
+        ]
+    }]
 };
 /**
 * Register the tavern preset with the host registry.
@@ -2255,6 +2262,7 @@ function tavernOperation(seg, method) {
         if (seg[4] === "retry") return "重试回复";
         return method === "PUT" ? "保存回复编辑" : "修改消息并重试";
     }
+    if (seg[3] === "compact") return "压缩酒馆上下文";
     if (seg[3] === "memories") return "保存角色经历";
     if (seg[3] === "enter") return "让角色出场";
     if (seg[3] === "activate") return "打开酒馆会话";
@@ -2266,6 +2274,7 @@ function tavernOperation(seg, method) {
 }
 function tavernFailure(error) {
     const name = error?.name, text = String(error?.message ?? error);
+    if (name === "ManualCompactionError") return { status: error.code === "busy" || error.code === "cancelled" || error.code === "changed" ? 409 : 502, reason: ({ busy: "会话或压缩任务正忙，请等待完成后再试。", cancelled: "压缩已取消。", changed: "压缩期间历史发生变化，请核对当前聊天后再试。", summary: "当前模型未能生成可用摘要。原始日志仍保留，请查看本地日志中的模型原因。", commit: "摘要提交未完整完成，请先检查当前会话，不要连续重试。", persistence: "压缩结果未能保存，请检查本地存储空间及权限。" })[error.code] ?? "压缩未完成，请保留当前会话并查看本地日志。" };
     if (name === "TavernRecoveryError") return { status: 500, reason: error.message };
     if (name === "SessionAlreadyOwnedError" || /already owned by an active write handle|session\/writer-held/.test(text)) return { status: 409, reason: "会话写入仍被另一个活动实例占用。请等待当前操作结束，再返回酒馆重试；若持续出现，请先保留草稿并正常退出后重开 DSH。不要删除会话锁或聊天文件。" };
     if (name === "SessionOwnershipLostError" || name === "SessionHandleClosedError") return { status: 409, reason: "当前会话的写入连接已失效。请保留草稿，返回会话列表后重新打开；若仍失败，请正常重开 DSH。" };
@@ -2692,6 +2701,30 @@ var TavernSessionRuntime = class {
         try { await handle.dispose(); this.retiredHandles.delete(handle); }
         catch (error) { this.retiredHandles.add(handle); this.deps.logger.warn(`tavern: retired agent cleanup failed: ${String(error)}`); }
     }
+    configureCompaction(agent) {
+        const backend = this.deps.agentPresets.serviceFor?.(agent, "compaction");
+        if (!backend || backend[Symbol.for("tavern.story-compaction")]) return backend;
+        const summarize = backend.summarize;
+        if (typeof summarize !== "function") return backend;
+        // Adapt the native backend's documented summarizer hook; its transaction/log protection stays native.
+        backend.summarize = function(input, owner, signal) {
+            const guidance = { role: "system", content: [{ type: "text", text: "本次压缩对象是角色扮演剧情。请用简体中文形成可续演的剧情检查点，重点保留：当前时间地点与在场人物、剧情推进到哪一步、角色关系与已确认的重要事实、各角色各自知情范围、未兑现约定与待解决冲突、用户的叙事偏好及最后交接场景。区分已经发生、尚未发生和猜测；不要复述完整对话，不编造进展，不写编程任务或文件清单。保留仍有效的旧摘要信息并合并新变化。" }] };
+            return summarize.call(this, { ...input, messages: [guidance, ...input.messages] }, owner, signal);
+        };
+        backend[Symbol.for("tavern.story-compaction")] = true;
+        return backend;
+    }
+    async compactPlay(playId) {
+        const play = this.deps.storage.getPlay(playId);
+        if (!play) throw notFound("酒馆会话不存在");
+        if (this.rebasing.has(playId)) throw conflict("会话正在更新，请稍后再压缩");
+        const handle = await this.ensureDirector(play);
+        if (handle.agent.status !== "idle" || [...this.roles.get(playId)?.values() ?? []].some(role => role.agent.status !== "idle")) throw conflict("角色正在输出，请完成后再压缩");
+        const backend = this.configureCompaction(handle.agent);
+        if (!backend) throw conflict("当前会话尚未挂载压缩服务，请正常重开 DSH 后再试");
+        const result = await backend.compactNow(handle.agent, AbortSignal.timeout(180000));
+        return { compacted: result !== null, items: result?.shadowedSeqs.length ?? 0, estimatedTokens: result?.shadowedTokenCount ?? 0 };
+    }
     async attachExisting(agent, system, loreContext, tools) {
         if (agent.status !== "idle") throw conflict("这份会话正在其他入口输出，请等待完成后再打开酒馆");
         const cleanup = [];
@@ -2703,7 +2736,7 @@ var TavernSessionRuntime = class {
         };
         try {
             if (typeof agent.runMaintenance !== "function") throw conflict("当前活动会话暂不支持安全接入，请先保留草稿后正常重开 DSH");
-            await agent.runMaintenance(() => this.sessionSetup(void 0, system, loreContext, tools, cleanup)(agent.ctx));
+            await agent.runMaintenance(() => this.sessionSetup(void 0, system, loreContext, tools, cleanup)(agent.ctx, agent));
             return { agent, borrowed: true, dispose };
         } catch (error) {
             await dispose();
@@ -2943,12 +2976,13 @@ var TavernSessionRuntime = class {
 	* @param speakTool - agent-scoped tool to register, or undefined.
 	*/
 	sessionSetup(presetId, system, loreContext, speakTool, cleanup) {
-		return async (agentCtx) => {
+		return async (agentCtx, agent) => {
 			if (presetId !== void 0) try {
 				await this.deps.agentPresets.mount(agentCtx, presetId);
 			} catch (error) {
 				this.deps.logger.warn(`tavern: preset "${presetId}" failed to mount (${String(error)}); session runs without it`);
 			}
+            if (agent) this.configureCompaction(agent);
             const track = release => { if (cleanup) cleanup.push(release); };
 			track(agentCtx.systemPrompt.section({
 				name: TAVERN_SECTION,
@@ -4909,6 +4943,9 @@ async function tavernHandler(deps, req, res) {
 					return sendJson(res, 200, updated);
 				});
 			}
+            if (seg.length === 4 && seg[3] === "compact" && method === "POST") {
+                return sendJson(res, 200, await runtime.withHistoryChange(seg[2], () => runtime.compactPlay(seg[2])));
+            }
 			if (seg.length === 4 && seg[3] === "activate" && method === "POST") {
 				const play = storage.getPlay(seg[2]);
 				if (play === void 0) return sendError(res, 404, "酒馆会话不存在");

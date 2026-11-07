@@ -1,5 +1,5 @@
 {
-  "snapshot": "2026-11-07-session-lifecycle-errors",
+  "snapshot": "2026-11-07-native-tavern-compaction-installed",
   "upstream": {
     "package": "dsh-tavern",
     "version": "0.1.0",
@@ -9,9 +9,9 @@
   "files": {
     "dist/dsh-tavern/LICENSE": "974324725104c692c1320a6d36b2b832f6aa648ba5312fd89788862c91e8c703",
     "dist/dsh-tavern/cordis.patch.yml": "03367517107349293495084642a41090ec4cf0cf72ba285707193a8aa233d140",
-    "dist/dsh-tavern/lib/client.js": "95edc160b5e656a84ac28268b4d2a695e19ed1919da475d8ba1b6f024edf025d",
+    "dist/dsh-tavern/lib/client.js": "6af550b46cfac9b5575c205f0f7aca135f85765ecf101dc97c09c5647a706131",
     "dist/dsh-tavern/lib/index.d.ts": "86d54e424d5034db567dadf626688b2f8bb5327f8ac11a42edfe26c16cff2068",
-    "dist/dsh-tavern/lib/index.js": "87499668fb4585f828e2c5c78b8109746bd6ea1cd7d6dc6cbcc023dee846c859",
+    "dist/dsh-tavern/lib/index.js": "8775cfacc76ef2fd14086bb7f9969f30b846dcd5bb6366b9c4332c88bd4b190d",
     "dist/dsh-tavern/package.json": "7aaef38d67ac1258674a174c8fdefdbe313dc80efc0857b4c105535f5881c118",
     "extras/tavern-cot-scope/LICENSE": "ebb4f09972aee8608be255debaf78451a68e95c290f55c240dec2ecfa16ea6be",
     "extras/tavern-cot-scope/README.i18n.yaml": "969a4835ce7e94fb4539865fcc8728fc620d11609a850553cbca9e43e744cc7e",

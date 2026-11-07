@@ -169,6 +169,7 @@ window.__ModuleLoader__.load({
 					body: JSON.stringify(input)
 				}),
 				getPlay: (id) => request(`/tavern/plays/${encodeURIComponent(id)}`),
+                compactPlay: id => request(`/tavern/plays/${encodeURIComponent(id)}/compact`, { method: "POST", body: "{}" }),
 				activatePlay: (id) => request(`/tavern/plays/${encodeURIComponent(id)}/activate`, {
 					method: "POST",
 					body: "{}"
@@ -1423,6 +1424,12 @@ function projectScene(items, characterNames, initialNames, override) {
 									onClick: openSettings,
 									children: "会话设置"
 								}),
+                                (0, react_jsx_runtime.jsx)(Button, {
+                                    variant: "ghost", disabled: running || props.branching || !inPlaySession,
+                                    title: "使用当前模型生成剧情摘要，会产生 API 用量；原始日志保留。",
+                                    onClick: props.onCompact, children: "压缩上下文"
+                                }),
+                                props.compactNotice && (0, react_jsx_runtime.jsx)("span", { role: "status", children: props.compactNotice }),
 								!inPlaySession && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
 									className: TavernView_module_css_default.badge,
 									children: "当前会话未绑定，请从左侧选择"
@@ -3344,6 +3351,17 @@ function projectScene(items, characterNames, initialNames, override) {
 					throw error;
 				}));
 			}, [activePlay, running, replyKey, runBranchOp]);
+            const [compactNotice, setCompactNotice] = (0, react.useState)("");
+            const compactContext = (0, react.useCallback)(() => {
+                if (!activePlay) return;
+                setCompactNotice("正在整理剧情摘要…");
+                return runBranchOp(async () => {
+                    try {
+                        const result = await tavernApi.compactPlay(activePlay.id);
+                        setCompactNotice(result.compacted ? `已压缩 ${result.items} 项旧上下文；后续从剧情摘要继续，原日志保留。` : "目前没有可压缩的旧上下文。");
+                    } catch (error) { setCompactNotice(""); throw error; }
+                });
+            }, [activePlay, runBranchOp]);
 			const retryReply = (0, react.useCallback)(() => {
 				if (activePlay === null) return;
 				runBranchOp(() => tavernApi.retryReply(activePlay.id));
@@ -3478,6 +3496,8 @@ function projectScene(items, characterNames, initialNames, override) {
 							onGoToCharacters: () => actions.setPanel("characters"),
 							onGoToLorebooks: () => actions.setPanel("lorebooks"),
 							onCreatePlay: createPlay,
+                            onCompact: compactContext,
+                            compactNotice,
 							onDeletePlay: deletePlay,
 							onSend: async (text) => {
 								actions.setError(null);
