@@ -3135,6 +3135,12 @@ function projectScene(items, characterNames, initialNames, override) {
             const selectPlay = (0, react.useCallback)(async (id) => {
                 const request = ++activationRequest.current;
                 actions.setError(null);
+                // null opens the new-play form; it is not a missing saved play.
+                if (id === null) {
+                    actions.setPlayId(null);
+                    actions.setPanel("chat");
+                    return;
+                }
                 const playSummary = state?.plays.find(play => play.id === id);
                 if (!playSummary) { actions.setError("会话列表已变化，请刷新后重新选择。"); return; }
                 try {
