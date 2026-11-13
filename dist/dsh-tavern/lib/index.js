@@ -177,6 +177,10 @@ var TavernStorage = class {
 	}
 	async setDefaultPreset(id) {
 		if (id === void 0) {
+			if (this.prefs.clearDefaultPreset !== void 0) {
+				await this.prefs.clearDefaultPreset();
+				return;
+			}
 			const section = this.prefs.get();
 			const next = {
 				...emptyDatabase(),
@@ -329,6 +333,18 @@ var LibraryStore = class LibraryStore {
 	};
 	root;
 	logger;
+	mutationTails = /* @__PURE__ */ new Map();
+	/** Order complete record mutations, including deletion and index publication. */
+	enqueue(collection, key, task) {
+		const queueKey = `${collection}/${key}`;
+		const run = (this.mutationTails.get(queueKey) ?? Promise.resolve()).then(task);
+		const settled = run.catch(() => {});
+		this.mutationTails.set(queueKey, settled);
+		settled.then(() => {
+			if (this.mutationTails.get(queueKey) === settled) this.mutationTails.delete(queueKey);
+		});
+		return run;
+	}
 	/**
 	* Construct the index without touching the disk. The plugin provides its
 	* service synchronously, so the store must exist before {@link load} has
@@ -390,18 +406,23 @@ var LibraryStore = class LibraryStore {
 			this.maps[collection].has(key) && /^[\p{L}\p{M}\p{N}._~-]+$/u.test(key) &&
 			key !== "." && key !== ".." && Buffer.byteLength(key, "utf8") <= 128;
 		if (!isSafeId(key) && !legacyRecord) throw new Error(`tavern library: 非法记录 id：${key}`);
-		await writeAtomic(join(this.root, collection, `${key}.json`), JSON.stringify(value));
-		this.maps[collection].set(key, value);
+		const data = JSON.stringify(value);
+		await this.enqueue(collection, key, async () => {
+			await writeAtomic(join(this.root, collection, `${key}.json`), data);
+			this.maps[collection].set(key, value);
+		});
 	}
 	/** Remove one record from disk and the index. Missing files are fine. */
 	async drop(collection, key) {
 		if (!isSafeId(key)) throw conflict("旧资料的 ID 暂不支持安全删除，资料和会话关联已保留");
-		try {
-			await rm(join(this.root, collection, `${key}.json`), { force: true });
-		} catch (error) {
-			throw new Error(`tavern library: cannot delete ${collection}/${key}: ${String(error)}`);
-		}
-		this.maps[collection].delete(key);
+		await this.enqueue(collection, key, async () => {
+			try {
+				await rm(join(this.root, collection, `${key}.json`), { force: true });
+			} catch (error) {
+				throw new Error(`tavern library: cannot delete ${collection}/${key}: ${String(error)}`);
+			}
+			this.maps[collection].delete(key);
+		});
 	}
 	all(collection) {
 		return [...this.maps[collection].values()];
@@ -595,6 +616,13 @@ var PrefsStore = class {
 	path;
 	logger;
 	current = emptyPrefs();
+	tail = Promise.resolve();
+	/** Serialize the entire read/merge/persist transaction, not just the bytes. */
+	enqueue(task) {
+		const run = this.tail.then(task);
+		this.tail = run.catch(() => {});
+		return run;
+	}
 	/**
 	* @param path - absolute path of `prefs.json`.
 	* @param logger - warnings for a file that exists but cannot be read.
@@ -633,20 +661,31 @@ var PrefsStore = class {
 		};
 	}
 	/** Merge a sparse patch and persist the result. */
-	async update(patch) {
-		const next = emptyPrefs();
-		const defaultPresetId = patch.defaultPresetId ?? this.current.defaultPresetId;
-		const style = patch.style ?? this.current.style;
-		if (defaultPresetId !== void 0) next.defaultPresetId = defaultPresetId;
-		if (style !== void 0) next.style = style;
-		await this.write(next);
+	update(patch) {
+		const supplied = { ...patch };
+		return this.enqueue(async () => {
+			const next = emptyPrefs();
+			const defaultPresetId = supplied.defaultPresetId ?? this.current.defaultPresetId;
+			const style = supplied.style ?? this.current.style;
+			if (defaultPresetId !== void 0) next.defaultPresetId = defaultPresetId;
+			if (style !== void 0) next.style = style;
+			await this.write(next);
+		});
 	}
-	/** Replace the document wholesale (used to clear a preference). */
+	/** Remove only the preset key, merging against the latest queued state. */
+	clearDefaultPreset() {
+		return this.enqueue(async () => {
+			const next = { ...this.current };
+			delete next.defaultPresetId;
+			await this.write(next);
+		});
+	}
+	/** Replace the document wholesale. */
 	async replace(next) {
 		const document = emptyPrefs();
 		if (next.defaultPresetId !== void 0) document.defaultPresetId = next.defaultPresetId;
 		if (next.style !== void 0) document.style = next.style;
-		await this.write(document);
+		await this.enqueue(() => this.write(document));
 	}
 	/**
 	* Persist one document.
@@ -722,8 +761,12 @@ function fileFromAvatar(avatar) {
 	if (avatar === void 0) return void 0;
 	const normalized = avatar.replace(/\\/g, "/");
 	if (!normalized.startsWith(`tavern/avatars/`)) return void 0;
-	const file = normalized.slice(15).split("/").pop() ?? "";
+	const file = normalized.slice(15);
 	return SAFE_FILE_RE.test(file) ? file : void 0;
+}
+/** Files are owned by the record whose id is their filename stem. */
+function ownsFile(id, file) {
+	return file.slice(0, file.lastIndexOf(".")) === id;
 }
 /**
 * File-backed avatar store.  Persisted paths are always relative to the DSH
@@ -771,7 +814,15 @@ var AvatarStore = class {
 		const avatar = record.avatar;
 		if (avatar === void 0) return record;
 		if (!avatar.startsWith("data:")) {
-			if (fileFromAvatar(avatar) !== void 0) return record;
+			const sourceFile = fileFromAvatar(avatar);
+			if (sourceFile !== void 0) {
+				if (ownsFile(record.id, sourceFile)) return record;
+				const source = await this.read(sourceFile);
+				if (source !== void 0 && source.bytes.length <= MAX_AVATAR_BYTES) return this.materializeCharacter({
+					...record,
+					avatar: `data:${source.contentType};base64,${source.bytes.toString("base64")}`
+				}, previous, options);
+			}
 			if (options.keepUnsupported === true) {
 				this.logger.error("tavern avatar: cannot migrate unrecognized avatar for character %s; keeping it unchanged", record.id);
 				return record;
@@ -815,7 +866,7 @@ var AvatarStore = class {
 	*/
 	async removePrevious(current, previous) {
 		const previousFile = previous !== void 0 ? fileFromAvatar(previous.avatar) : void 0;
-		if (previousFile === void 0 || previousFile.toLowerCase() === current.toLowerCase()) return;
+		if (previousFile === void 0 || previous === void 0 || !ownsFile(previous.id, previousFile) || !ownsFile(previous.id, current) || previousFile.toLowerCase() === current.toLowerCase()) return;
 		await rm(this.filePath(previousFile), { force: true }).catch(() => void 0);
 	}
 	/**
@@ -889,8 +940,8 @@ var AvatarStore = class {
 	/** Remove the on-disk avatar for a deleted character. */
 	async removeCharacter(record) {
 		const file = fileFromAvatar(record.avatar);
-		if (file === void 0) return;
-		await rm(this.filePath(file), { force: true }).catch(() => void 0);
+		if (file === void 0 || !ownsFile(record.id, file)) return;
+		await this.serialize(record.id, () => rm(this.filePath(file), { force: true }).catch(() => void 0));
 	}
 };
 //#endregion
@@ -1633,6 +1684,7 @@ function serializePreset(preset) {
 	out.name = preset.name;
 	const set = (key, value) => {
 		if (value !== void 0) out[key] = value;
+		else delete out[key];
 	};
 	set("max_tokens", preset.maxTokens);
 	set("temp", preset.temperature);
@@ -1647,6 +1699,7 @@ function serializePreset(preset) {
 	set("presence_penalty", preset.presencePenalty);
 	set("frequency_penalty", preset.frequencyPenalty);
 	if (preset.model !== void 0) out.custom_model = preset.model;
+	else delete out.custom_model;
 	return out;
 }
 function str(value) {
@@ -2383,10 +2436,10 @@ function userMessage(content) {
 function roleSessionId(playId, characterId) {
 	return `tavern-role-${createHash("sha256").update(`${playId}\u0000${characterId}`).digest("hex").slice(0, 24)}`;
 }
-/** Extract only text produced after the current role call began. */
-function lastAssistantText(session, start) {
+/** Extract the final assistant text from an agent's session log. */
+function lastAssistantText(session, after = 0) {
 	const events = session.snapshotEvents();
-	for (let index = events.length - 1; index >= start; index--) {
+	for (let index = events.length - 1; index >= after; index--) {
 		const event = events[index];
 		if (event === void 0) continue;
 		if (event.type !== "assistant/message") continue;
@@ -2811,6 +2864,31 @@ var TavernSessionRuntime = class {
 	directorInflight = /* @__PURE__ */ new Map();
 	/** `${playId}:${characterId}` → in-flight role assembly (same race as the director). */
 	roleInflight = /* @__PURE__ */ new Map();
+	closed = false;
+	disposal;
+	playEpochs = /* @__PURE__ */ new Map();
+	dropInflight = /* @__PURE__ */ new Map();
+	epoch(playId) {
+		return this.playEpochs.get(playId) ?? 0;
+	}
+	assertActive(playId, epoch = this.epoch(playId)) {
+		if (this.closed || this.dropInflight.has(playId) || epoch !== this.epoch(playId)) throw conflict("酒馆会话已关闭或正在清理，请重新打开");
+	}
+	/** Late creations own their handle until it can be safely published. */
+	async completeAssembly(playId, epoch, handle, sessionId, publish) {
+		try {
+			this.assertActive(playId, epoch);
+			await this.showInWorkspace(sessionId);
+			this.assertActive(playId, epoch);
+			publish();
+			return handle;
+		} catch (error) {
+			await handle.dispose().catch((disposeError) => {
+				this.deps.logger.error(`tavern: late agent disposal failed: ${String(disposeError)}`);
+			});
+			throw error;
+		}
+	}
 	/**
 	* Declared explicitly rather than as a constructor parameter property: this
 	* module is imported directly by `scripts/verify/*.mjs`, which run under
@@ -2829,14 +2907,25 @@ var TavernSessionRuntime = class {
 	* single agent had actually released its session — a reload could then race
 	* the old agents against the new ones over the same session ids.
 	*/
-	async dispose() {
+	dispose() {
+		if (this.disposal !== void 0) return this.disposal;
+		this.closed = true;
 		const handles = [...this.directors.values(), ...this.retiredHandles];
 		for (const byPlay of this.roles.values()) handles.push(...byPlay.values());
 		this.directors.clear();
 		this.roles.clear();
 		this.speakQueues.clear();
-		const settled = await Promise.allSettled(handles.map((handle) => handle.dispose()));
-		for (const result of settled) if (result.status === "rejected") this.deps.logger.error(`tavern: agent disposal failed: ${String(result.reason)}`);
+		const pending = [
+			...this.directorInflight.values(),
+			...this.roleInflight.values(),
+			...this.dropInflight.values()
+		];
+		this.disposal = (async () => {
+			const settled = await Promise.allSettled(handles.map((handle) => handle.dispose()));
+			for (const result of settled) if (result.status === "rejected") this.deps.logger.error(`tavern: agent disposal failed: ${String(result.reason)}`);
+			await Promise.allSettled(pending);
+		})();
+		return this.disposal;
 	}
 	/** Run one tavern_speak task after any previous task for the same agent settles. */
 	enqueueSpeak(key, task) {
@@ -2861,11 +2950,13 @@ var TavernSessionRuntime = class {
 		if (seedOverride === void 0 && this.rebasing.has(play.id)) {
 			throw conflict("酒馆会话正在更新，请稍候");
 		}
+		this.assertActive(play.id);
+		const epoch = this.epoch(play.id);
 		const existing = this.directors.get(play.id);
 		if (existing !== void 0) return existing;
 		const inflight = this.directorInflight.get(play.id);
 		if (inflight !== void 0) return inflight;
-		const attempt = this.createDirector(play, seedOverride);
+		const attempt = this.createDirector(play, epoch, seedOverride);
 		this.directorInflight.set(play.id, attempt);
 		try {
 			return await attempt;
@@ -2874,7 +2965,7 @@ var TavernSessionRuntime = class {
 		}
 	}
 	/** The single assembly attempt behind {@link ensureDirector}. */
-	async createDirector(play, seedOverride) {
+	async createDirector(play, epoch, seedOverride) {
 		const storage = this.deps.storage;
 		const preset = play.presetId !== void 0 ? storage.getPreset(play.presetId) : void 0;
 		const model = resolveModel(this.deps, preset);
@@ -2890,7 +2981,9 @@ var TavernSessionRuntime = class {
 		};
 		const loreContext = this.buildLoreContext(play, fence);
 		await this.deps.ensurePreset();
+		this.assertActive(play.id, epoch);
 		const persisted = await this.persistedSession(sessionId);
+		this.assertActive(play.id, epoch);
 		const setup = this.sessionSetup(persisted.preset ?? "tavern", directorSystem, loreContext, [this.speakToolDefinition(), this.memoryReviewTool()]);
 		const agentOptions = {
 			...model.provider === void 0 ? {} : { provider: model.provider },
@@ -2920,9 +3013,9 @@ var TavernSessionRuntime = class {
 			});
 		}
 		this.liveOptions.set(handle.agent, handle.borrowed ? handle.agent.options : agentOptions);
-        this.directors.set(play.id, handle);
-		await this.showInWorkspace(sessionId);
-		return handle;
+		return this.completeAssembly(play.id, epoch, handle, sessionId, () => {
+			this.directors.set(play.id, handle);
+		});
 	}
 	/**
 	* The preset a persisted session actually runs, newest selection winning
@@ -3251,37 +3344,31 @@ var TavernSessionRuntime = class {
 		if (!target || !this.currentScene(play).characterIds.includes(target.id)) throw conflict("该角色尚未出场，请先点击角色头像");
 		if (focusedId !== void 0 && target.id !== focusedId) throw conflict("本轮请由用户点名的角色回应");
 		if (target === void 0) throw new Error("tavern_speak: 角色列表为空");
+		this.assertActive(play.id);
+		const epoch = this.epoch(play.id);
 		const instruction = args.instruction ?? `请以${target.card.data.name}的身份说下一句台词。`;
 		const handle = await this.ensureRoleAgent(play, target);
 		return this.enqueueSpeak(String(handle.agent.id), async () => {
+			this.assertActive(play.id, epoch);
 			const signal = exec.signal;
 			if (signal.aborted) throw new Error("调用已取消");
-			const start = handle.agent.session.snapshotEvents().length;
-			const done = handle.agent.whenIdle();
+			const boundary = handle.agent.session.snapshotEvents().length;
 			try {
 				handle.agent.followup(userMessage(instruction));
 			} catch (error) {
-				done.catch(() => {});
 				throw new Error(`${target.card.data.name} 的角色会话不可用：${error instanceof Error ? error.message : String(error)}`);
 			}
-			const wait = done;
+			const wait = handle.agent.whenIdle();
 			let onAbort;
+			let timer;
 			const timeout = new Promise((_, reject) => {
-				const timer = setTimeout(() => reject(/* @__PURE__ */ new Error("角色回应超时")), this.deps.config.speakTimeoutMs);
-				onAbort = () => {
-					clearTimeout(timer);
-					reject(/* @__PURE__ */ new Error("调用已取消"));
-				};
+				timer = setTimeout(() => reject(/* @__PURE__ */ new Error("角色回应超时")), this.deps.config.speakTimeoutMs);
+				onAbort = () => reject(/* @__PURE__ */ new Error("调用已取消"));
 				if (signal.aborted) {
 					onAbort();
 					return;
 				}
 				signal.addEventListener("abort", onAbort, { once: true });
-				const clear = () => {
-					clearTimeout(timer);
-					signal.removeEventListener("abort", onAbort);
-				};
-				wait.then(clear, clear);
 			});
 			try {
 				await Promise.race([wait, timeout]);
@@ -3293,8 +3380,14 @@ var TavernSessionRuntime = class {
 					}, { keepInbox: true });
 				} catch {}
 				throw error;
+			} finally {
+				if (timer !== void 0) clearTimeout(timer);
+				if (onAbort !== void 0) signal.removeEventListener("abort", onAbort);
 			}
-			const reply = lastAssistantText(handle.agent.session, start);
+			this.assertActive(play.id, epoch);
+			const end = [...handle.agent.session.snapshotEvents().slice(boundary)].reverse().find((event) => event.type === "turn/end");
+			if (end?.type !== "turn/end" || end.data.reason.kind !== "completed" && end.data.reason.kind !== "max-tokens") throw new Error(`${target.card.data.name} 的本次回复未成功完成`);
+			const reply = lastAssistantText(handle.agent.session, boundary);
 			if (reply.trim() === "") throw new Error(`${target.card.data.name} 没有产出回复`);
 			return { reply: reply.trim() };
 		});
@@ -3302,6 +3395,8 @@ var TavernSessionRuntime = class {
 	/** Create (or reuse) the character agent for one play (multi-agent mode). */
 	async ensureRoleAgent(play, character) {
 		if (this.rebasing.has(play.id)) throw conflict("酒馆会话正在更新，请稍候");
+		this.assertActive(play.id);
+		const epoch = this.epoch(play.id);
 		{
 			const existing = this.roles.get(play.id)?.get(character.id);
 			if (existing !== void 0) return existing;
@@ -3309,7 +3404,7 @@ var TavernSessionRuntime = class {
 		const key = `${play.id}:${character.id}`;
 		const inflight = this.roleInflight.get(key);
 		if (inflight !== void 0) return inflight;
-		const attempt = this.createRoleAgent(play, character);
+		const attempt = this.createRoleAgent(play, character, epoch);
 		this.roleInflight.set(key, attempt);
 		try {
 			return await attempt;
@@ -3318,13 +3413,8 @@ var TavernSessionRuntime = class {
 		}
 	}
 	/** The single assembly attempt behind {@link ensureRoleAgent}. */
-	async createRoleAgent(play, character) {
-		let byPlay = this.roles.get(play.id);
-		if (byPlay === void 0) {
-			byPlay = /* @__PURE__ */ new Map();
-			this.roles.set(play.id, byPlay);
-		}
-		const existing = byPlay.get(character.id);
+	async createRoleAgent(play, character, epoch) {
+		const existing = this.roles.get(play.id)?.get(character.id);
 		if (existing !== void 0) return existing;
 		const storage = this.deps.storage;
 		const model = resolveModel(this.deps, storage.getPreset(play.presetId));
@@ -3340,7 +3430,9 @@ var TavernSessionRuntime = class {
 		const sessionId = roleSessionId(play.id, character.id);
 		const loreContext = this.buildLoreContext(play, fence, character.id);
 		await this.deps.ensurePreset();
+		this.assertActive(play.id, epoch);
 		const persisted = await this.persistedSession(sessionId);
+		this.assertActive(play.id, epoch);
 		const setup = this.sessionSetup(persisted.preset ?? "tavern", system, loreContext);
 		const agentOptions = {
 			...model.provider === void 0 ? {} : { provider: model.provider },
@@ -3364,9 +3456,14 @@ var TavernSessionRuntime = class {
 			setup
 		});
 		this.liveOptions.set(handle.agent, handle.borrowed ? handle.agent.options : agentOptions);
-        byPlay.set(character.id, handle);
-		await this.showInWorkspace(sessionId);
-		return handle;
+		return this.completeAssembly(play.id, epoch, handle, sessionId, () => {
+			let byPlay = this.roles.get(play.id);
+			if (byPlay === void 0) {
+				byPlay = /* @__PURE__ */ new Map();
+				this.roles.set(play.id, byPlay);
+			}
+			byPlay.set(character.id, handle);
+		});
 	}
 	/** Clicking a portrait explicitly requests one generation from this character. */
 	async enterCharacter(playId, characterId, expectedUpdatedAt) {
@@ -3465,22 +3562,34 @@ var TavernSessionRuntime = class {
     }
 
 	/** Drop the live agents of one play (play deleted). */
-	async dropPlay(playId) {
+	dropPlay(playId) {
+		const existing = this.dropInflight.get(playId);
+		if (existing !== void 0) return existing;
+		this.playEpochs.set(playId, this.epoch(playId) + 1);
+		const handles = [];
 		const director = this.directors.get(playId);
-		if (director !== void 0) {
-			await director.dispose();
-            if (this.directors.get(playId) === director) this.directors.delete(playId);
-			this.speakQueues.delete(String(director.agent.id));
-		}
+		if (director !== void 0) handles.push(director);
 		const byPlay = this.roles.get(playId);
-		if (byPlay !== void 0) {
-			for (const [characterId, handle] of byPlay) {
-                await handle.dispose();
-                byPlay.delete(characterId);
-				this.speakQueues.delete(String(handle.agent.id));
-			}
-            if (this.roles.get(playId) === byPlay) this.roles.delete(playId);
-		}
+		if (byPlay !== void 0) handles.push(...byPlay.values());
+		this.directors.delete(playId);
+		this.roles.delete(playId);
+		for (const handle of handles) this.speakQueues.delete(String(handle.agent.id));
+		const pending = [];
+		const directorAttempt = this.directorInflight.get(playId);
+		if (directorAttempt !== void 0) pending.push(directorAttempt);
+		for (const [key, attempt] of this.roleInflight) if (key.startsWith(`${playId}:`)) pending.push(attempt);
+		const run = (async () => {
+			const disposed = await Promise.allSettled(handles.map((handle) => handle.dispose()));
+			await Promise.allSettled(pending);
+			const failed = disposed.find((result) => result.status === "rejected");
+			if (failed?.status === "rejected") throw failed.reason;
+		})();
+		this.dropInflight.set(playId, run);
+		const clear = () => {
+			if (this.dropInflight.get(playId) === run) this.dropInflight.delete(playId);
+		};
+		run.then(clear, clear);
+		return run;
 	}
 	/**
 	* The play session's current event log, live when a director is running.
@@ -4102,6 +4211,12 @@ function relativeTo(userDir, filePath) {
 function normalizeSource(source) {
 	return source.replace(/\\/g, "/").toLowerCase();
 }
+/** Keep portable relative diagnostics, but namespace persisted identities by real root. */
+function importSource(userDir, relative) {
+	const root = userDir.replace(/\\/g, "/");
+	const canonical = process.platform === "win32" ? root.toLowerCase() : root;
+	return `tauritavern/${createHash("sha256").update(canonical).digest("hex")}/${relative.replace(/\\/g, "/")}`;
+}
 /** Idempotence for world books imported before the source field existed. */
 function dedupeLorebooks(existing, incoming) {
 	const seen = new Set(existing.map((record) => record.source !== void 0 ? normalizeSource(record.source) : void 0).filter((source) => source !== void 0));
@@ -4179,7 +4294,7 @@ async function readCharacterFile(ctx, charactersDir, file) {
 		} else card = normalizeCard(JSON.parse(stripBom(read.bytes.toString("utf8"))), source);
 		return {
 			id: newId("char"),
-			source,
+			source: importSource(ctx.userDir, source),
 			...avatar !== void 0 ? { avatar } : {},
 			createdAt: nowIso(),
 			updatedAt: nowIso(),
@@ -4244,7 +4359,7 @@ async function importCharacterJournalRecords(ctx, charactersDir, files, isImport
 			const rawCard = typeof entry.value === "string" ? JSON.parse(entry.value) : entry.value;
 			records.push({
 				id: newId("char"),
-				source,
+				source: importSource(ctx.userDir, source),
 				createdAt: nowIso(),
 				updatedAt: nowIso(),
 				card: normalizeCard(rawCard, source)
@@ -4260,19 +4375,19 @@ async function importCharacterJournalRecords(ctx, charactersDir, files, isImport
 	}
 	return records;
 }
-async function importCharacters(ctx, charactersDir, isImported) {
+async function importCharacters(ctx, charactersDir, isImported, isLegacyImported) {
 	const allFiles = await listFiles(ctx, charactersDir, "character");
 	const normalFiles = allFiles.filter((name) => /\.(png|json)$/i.test(name));
 	const records = [];
 	for (const file of normalFiles) {
 		if (isImported(relativeTo(ctx.userDir, path.join(charactersDir, file)))) continue;
 		const record = await readCharacterFile(ctx, charactersDir, file);
-		if (record === void 0) continue;
+		if (record === void 0 || isLegacyImported(record)) continue;
 		records.push(await materializeAvatar(ctx, record));
 	}
 	if (normalFiles.length === 0) {
-		const journalFiles = allFiles.filter((name) => !/\.(png|json)$/i.test(name));
-		records.push(...await importCharacterJournalRecords(ctx, charactersDir, journalFiles, isImported));
+		const journal = await importCharacterJournalRecords(ctx, charactersDir, allFiles.filter((name) => !/\.(png|json)$/i.test(name)), isImported);
+		records.push(...journal.filter((record) => !isLegacyImported(record)));
 	}
 	return records;
 }
@@ -4299,7 +4414,7 @@ async function importLorebooks(ctx, worldsDir) {
 			records.push({
 				id: newId("book"),
 				name,
-				source,
+				source: importSource(ctx.userDir, source),
 				createdAt: nowIso(),
 				updatedAt: nowIso(),
 				book
@@ -4339,7 +4454,7 @@ async function importPresets(ctx) {
 				const preset = importPreset(raw, newId("preset"), name);
 				records.push({
 					...preset,
-					source
+					source: importSource(ctx.userDir, source)
 				});
 			} catch (error) {
 				ctx.logger.warn("tavern import: cannot parse preset %s: %s", source, String(error));
@@ -4396,7 +4511,8 @@ async function importTauriTavernData(storage, avatars, input, selection = {}) {
 	});
 	if (categories.characters) {
 		const importedSources = new Set(db.characters.map((record) => record.source).filter((source) => source !== void 0).map(normalizeSource));
-		const records = await importCharacters(ctx, path.join(resolved.userDir, "characters"), (source) => importedSources.has(normalizeSource(source)));
+		const legacyCards = new Set(db.characters.filter((record) => record.source !== void 0 && !record.source.startsWith("tauritavern/")).map((record) => `${normalizeSource(record.source)}\u0000${JSON.stringify(record.card)}`));
+		const records = await importCharacters(ctx, path.join(resolved.userDir, "characters"), (source) => importedSources.has(normalizeSource(importSource(ctx.userDir, source))), (record) => legacyCards.has(`${normalizeSource(record.source.split("/").slice(2).join("/"))}\u0000${JSON.stringify(record.card)}`));
 		await storage.appendCharacters(records);
 		report.imported.characters = records.length;
 	}
@@ -4759,7 +4875,10 @@ async function tavernHandler(deps, req, res) {
 				const existing = storage.getLorebook(seg[2]);
 				if (existing === void 0) return sendError(res, 404, "世界书不存在");
 				if (typeof body?.book !== "object" || body.book === null) return sendError(res, 400, "缺少世界书内容");
-				const book = validated("世界书", () => normalizeWorldBook(body.book));
+				const book = validated("世界书", () => normalizeWorldBook({
+					...existing.book,
+					...body.book
+				}));
 				const updated = {
 					...existing,
 					name: typeof body?.name === "string" && body.name !== "" ? body.name : existing.name,
@@ -5065,7 +5184,7 @@ function hostList(value) {
 * @returns a fully populated config.
 */
 function normalizeConfig(input) {
-	if (input === void 0 || input === null) return { ...DEFAULT_CONFIG };
+	if (input === void 0 || input === null) input = {};
 	if (typeof input !== "object" || Array.isArray(input)) throw new Error("酒馆插件配置必须是对象");
 	const raw = input;
 	const fromEnv = (process.env[HOST_ALLOW_ENV] ?? "").split(",").map((entry) => entry.trim().toLowerCase()).filter((entry) => entry !== "");

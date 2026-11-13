@@ -2148,6 +2148,7 @@ function projectScene(items, characterNames, initialNames, override) {
 				setSaving(true);
 				try {
 					await props.api.updateLorebook(props.book.id, {
+						...props.book.book,
 						name,
 						entries
 					}, name);
