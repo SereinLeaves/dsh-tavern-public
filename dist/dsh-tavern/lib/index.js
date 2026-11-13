@@ -1690,15 +1690,22 @@ function neutralizeDelimiters(text) {
 }
 /** Character card sections joined into the role description. All card text
 is imported, untrusted content: the caller must fence it. */
+function renderCardText(text, characterName) {
+	return stripPromptVariables(text.replace(/\{\{\s*(user|char)\s*\}\}/gi, (_, macro) =>
+		macro.toLowerCase() === "char" ? characterName : "玩家"
+	));
+}
 function characterProfile(character) {
 	const data = character.card.data;
 	const sections = [];
-	const description = stripPromptVariables(data.description.trim());
-	const personality = stripPromptVariables(data.personality.trim());
-	const scenario = stripPromptVariables(data.scenario.trim());
+	const description = renderCardText(data.description.trim(), data.name);
+	const personality = renderCardText(data.personality.trim(), data.name);
+	const scenario = renderCardText(data.scenario.trim(), data.name);
 	if (description !== "") sections.push(`角色设定：\n${description}`);
 	if (personality !== "") sections.push(`性格：\n${personality}`);
 	if (scenario !== "") sections.push(`当前场景：\n${scenario}`);
+	const examples = renderCardText((data.mes_example ?? "").trim(), data.name);
+	if (examples !== "") sections.push(`对话示例（仅供参考）：\n${examples}`);
 	return sections.join("\n\n");
 }
 /** Mint a fresh fence for one system-prompt build. */
@@ -1733,7 +1740,7 @@ function buildCharacterSystem(character, loreText, preset, extras, fence = creat
 	if (safeLoreText !== "") parts.push(fence.wrap(safeLoreText));
 	if (safeExtras.length > 0) parts.push(fence.wrap(safeExtras.join("\n")));
 	const presetSystem = stripPromptVariables(preset?.systemPrompt ?? "").trim();
-	const cardSystem = stripPromptVariables(data.system_prompt).trim();
+	const cardSystem = renderCardText(data.system_prompt, data.name).trim();
 	if (presetSystem !== "") parts.push(`扮演风格要求：\n${presetSystem}`);
 	if (cardSystem !== "") parts.push(fence.wrap(`扮演风格要求（角色卡自带）：\n${cardSystem}`));
 	parts.push([
@@ -1743,7 +1750,7 @@ function buildCharacterSystem(character, loreText, preset, extras, fence = creat
 		"- 不要输出关于你自己的解释、不要提及\"角色扮演\"或\"AI\"等字眼，除非角色设定要求。",
 		"- 保持角色的一致性，回应要自然、有代入感。"
 	].join("\n"));
-	const postHistory = stripPromptVariables(data.post_history_instructions).trim();
+	const postHistory = renderCardText(data.post_history_instructions, data.name).trim();
 	if (postHistory !== "") parts.push(fence.wrap(`扮演补充规则（角色卡自带）：\n${postHistory}`));
 	return parts.join("\n\n");
 }
@@ -1759,9 +1766,9 @@ function buildClassicSystem(play, characters, loreText, preset, fence = createFe
 		parts.push(`【角色 ${neutralizeDelimiters(stripPromptVariables(data.name))}】`);
 		const profile = characterProfile(character);
 		if (profile !== "") parts.push(fence.wrap(profile));
-		const cardSystem = stripPromptVariables(data.system_prompt).trim();
+		const cardSystem = renderCardText(data.system_prompt, data.name).trim();
 		if (cardSystem !== "") parts.push(fence.wrap(`扮演风格要求（角色卡自带）：\n${cardSystem}`));
-		const postHistory = stripPromptVariables(data.post_history_instructions).trim();
+		const postHistory = renderCardText(data.post_history_instructions, data.name).trim();
 		if (postHistory !== "") parts.push(fence.wrap(`扮演补充规则（${data.name} 角色卡自带）：\n${postHistory}`));
 	}
 	const safeLoreText = stripPromptVariables(loreText);
