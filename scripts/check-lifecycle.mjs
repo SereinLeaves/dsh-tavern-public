@@ -48,7 +48,7 @@ for(const failure of ['setup','disk','commit','new-disposal','queued']){
 }
 {
  const f=fixture('old-disposal');await assert.rejects(f.runtime.dropPlay(f.original.id),/old cleanup/);
- assert.equal(f.runtime.directors.get(f.original.id),f.old,'Failed disposal remains reachable');
+ assert.equal(f.runtime.directors.has(f.original.id),false,'Retirement removes the writer from active directors');
 }
 {
  const failure=Object.assign(Error('fixture read corruption'),{name:'SessionPersistenceCorruptionError'});

@@ -3130,8 +3130,12 @@ var TavernSessionRuntime = class {
 			const parts = [];
 			parts.push("你是一场角色扮演（roleplay）的主持者（director）。");
 			parts.push(fence.contract);
-			const names = play.characterIds.map((id) => characters.find((c) => c.id === id)?.card.data.name).filter((name) => name !== void 0).map((name) => neutralizeDelimiters(stripPromptVariables(name)));
-			if (names.length > 0) parts.push(`可用角色：${names.join("、")}`);
+			const entries = characters.map((character) => ({
+				name: neutralizeDelimiters(stripPromptVariables(character.card.data.name)),
+				characterId: character.id
+			}));
+			if (entries.length > 0) parts.push(`可用角色：${JSON.stringify(entries)}`);
+			parts.push("调用 tavern_speak 时优先仅传入所选角色的 characterId。只有不知道 ID 时才传 characterName。");
 			parts.push(sceneRule);
 			for (const character of characters) {
 				const data = character.card.data;
@@ -3145,7 +3149,7 @@ var TavernSessionRuntime = class {
 				"角色经历属于各自的私人认知。主持者可用来保持剧情连续；其他角色只有亲历或被告知后才知道。派发角色发言任务时，只提供其知情内容和当前可观察场景。",
 				"经历中的过去认知按时间理解，当前状态修正初始设定；待发生约定以实际剧情是否兑现为准。",
 				"主持规则：",
-				`- 当剧情需要角色发言时，调用 tavern_speak 工具（参数 characterName=角色名、instruction=你想让角色表达的内容），工具会返回该角色的台词，你直接把它写进回复。`,
+				`- 当剧情需要角色发言时，调用 tavern_speak 工具（参数 characterId=「可用角色」列表中对应角色的 ID、instruction=你想让角色表达的内容。仅当列表没有提供该角色的 ID 时使用 characterName），工具会返回该角色的台词，你直接把它写进回复。`,
 				`- 你可以描写场景、环境、NPC 与旁白（${play.narratorEnabled ? "叙述者功能已启用，请经常描写场景" : "叙述保持克制，以对话为主"}）。`,
 				"- 用户角色是用户扮演的角色，不在「可用角色」列表中；禁止替用户角色发言、行动、写心理，也不要替他做任何决定。你只写在场其他角色的反应与必要的场景过渡。",
 				"- 把角色台词写进回复时，每个角色的发言以「角色名：」开头单独成行（角色名必须在「在场角色」之内）；旁白与场景描写直接输出。",
@@ -3280,7 +3284,7 @@ var TavernSessionRuntime = class {
 	speakToolDefinition() {
 		return {
 			name: "tavern_speak",
-			description: "让在场角色说出台词。传入角色名或角色 id（两者可选，都不传时使用第一个在场角色），以及你想让角色表达的内容、情绪或所处情境；工具会让该角色以自身的性格与记忆回应，并返回其台词。",
+			description: "让在场角色说出台词。优先传入角色 id，缺少 id 时传角色名（都不传时使用第一个在场角色），以及你想让角色表达的内容、情绪或所处情境；工具会让该角色以自身的性格与记忆回应，并返回其台词。",
 			parameters: {
 				type: "object",
 				properties: {
@@ -3290,7 +3294,7 @@ var TavernSessionRuntime = class {
 					},
 					characterId: {
 						type: "string",
-						description: "角色的内部 id（可选，与 characterName 二选一）"
+						description: "优先使用可用角色列表中的 characterId"
 					},
 					instruction: {
 						type: "string",
@@ -3337,13 +3341,24 @@ var TavernSessionRuntime = class {
         if (!play.multiAgent) throw conflict("当前为单 agent 模式，请直接回复，不要调用角色发言工具");
 		const characters = play.characterIds.map((id) => this.deps.storage.getCharacter(id)).filter((c) => c !== void 0);
 		const focusedId = this.sceneFocus.get(play.id)?.characterId;
-		const requested = args.characterId !== void 0 || args.characterName !== void 0;
-		const target = requested
-			? characters.find(character => character.id === args.characterId || character.card.data.name === args.characterName)
-			: characters.find(character => character.id === (focusedId ?? this.currentScene(play).activeCharacterIds[0]));
-		if (!target || !this.currentScene(play).characterIds.includes(target.id)) throw conflict("该角色尚未出场，请先点击角色头像");
+		const scene = this.currentScene(play);
+		let target;
+		if (args.characterId !== void 0) {
+			target = characters.find(character => character.id === args.characterId);
+		} else if (args.characterName !== void 0) {
+			const name = args.characterName.trim();
+			const exact = characters.filter(character => character.card.data.name === name);
+			const matches = exact.length || !name ? exact : characters.filter(character =>
+				character.card.data.name.split("----", 1)[0].trim() === name
+			);
+			if (matches.length > 1) throw conflict("角色名称匹配到多个角色，请传入角色 ID");
+			target = matches[0];
+		} else {
+			target = characters.find(character => character.id === (focusedId ?? scene.activeCharacterIds[0]));
+		}
+		if (!target) throw conflict("找不到要发言的角色，请核对角色 ID 或名称");
+		if (!scene.characterIds.includes(target.id)) throw conflict("该角色尚未出场，请先点击角色头像");
 		if (focusedId !== void 0 && target.id !== focusedId) throw conflict("本轮请由用户点名的角色回应");
-		if (target === void 0) throw new Error("tavern_speak: 角色列表为空");
 		this.assertActive(play.id);
 		const epoch = this.epoch(play.id);
 		const instruction = args.instruction ?? `请以${target.card.data.name}的身份说下一句台词。`;

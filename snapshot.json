@@ -9,9 +9,9 @@
   "files": {
     "dist/dsh-tavern/LICENSE": "974324725104c692c1320a6d36b2b832f6aa648ba5312fd89788862c91e8c703",
     "dist/dsh-tavern/cordis.patch.yml": "03367517107349293495084642a41090ec4cf0cf72ba285707193a8aa233d140",
-    "dist/dsh-tavern/lib/client.js": "aed9bd6ffa740af4f95fcccd1603b418a96fae0a6633d698a71d86a1bb60ab54",
+    "dist/dsh-tavern/lib/client.js": "49f9e773d30ca53455daf82d35d3962c1cac837e5a2441d30546aa568a5de1ec",
     "dist/dsh-tavern/lib/index.d.ts": "86d54e424d5034db567dadf626688b2f8bb5327f8ac11a42edfe26c16cff2068",
-    "dist/dsh-tavern/lib/index.js": "8775cfacc76ef2fd14086bb7f9969f30b846dcd5bb6366b9c4332c88bd4b190d",
+    "dist/dsh-tavern/lib/index.js": "4d346e5d9d4df488ed04af830efba624a4e5ce2ff8f5521d90d5243b24d1e57e",
     "dist/dsh-tavern/package.json": "7aaef38d67ac1258674a174c8fdefdbe313dc80efc0857b4c105535f5881c118",
     "extras/tavern-cot-scope/LICENSE": "ebb4f09972aee8608be255debaf78451a68e95c290f55c240dec2ecfa16ea6be",
     "extras/tavern-cot-scope/README.i18n.yaml": "969a4835ce7e94fb4539865fcc8728fc620d11609a850553cbca9e43e744cc7e",
