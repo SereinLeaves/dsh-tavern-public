@@ -2046,7 +2046,7 @@ function projectScene(items, characterNames, initialNames, override) {
 		function sameMessageRow(prev, next) {
 			const a = prev.message;
 			const b = next.message;
-			return JSON.stringify(prev.speakerAvatars) === JSON.stringify(next.speakerAvatars) && prev.characterAvatar === next.characterAvatar && prev.reasoningView === next.reasoningView && prev.isLastAssistant === next.isLastAssistant && prev.busy === next.busy && prev.running === next.running && prev.swipe === next.swipe && prev.onRetry === next.onRetry && prev.onSwipe === next.onSwipe && prev.onSaveEdit === next.onSaveEdit && a.id === b.id && a.kind === b.kind && a.name === b.name && a.text === b.text && a.thinking === b.thinking && a.status === b.status && a.errorText === b.errorText && a.messageId === b.messageId && a.stepText === b.stepText;
+			return JSON.stringify(prev.speakerAvatars) === JSON.stringify(next.speakerAvatars) && prev.characterAvatar === next.characterAvatar && prev.reasoningView === next.reasoningView && prev.isLastAssistant === next.isLastAssistant && prev.busy === next.busy && prev.running === next.running && prev.swipe === next.swipe && prev.onRetry === next.onRetry && prev.onSwipe === next.onSwipe && prev.onSaveEdit === next.onSaveEdit && a.id === b.id && a.kind === b.kind && a.name === b.name && a.text === b.text && a.thinking === b.thinking && a.status === b.status && a.errorText === b.errorText && a.messageId === b.messageId && a.stepText === b.stepText && JSON.stringify(a.replyParts) === JSON.stringify(b.replyParts);
 		}
 		const MessageRow = (0, react.memo)(function MessageRow(props) {
 			const { message } = props;
@@ -2055,7 +2055,8 @@ function projectScene(items, characterNames, initialNames, override) {
 			const copyLabel = copyStatus?.text === message.text ? copyStatus.label : "";
 			const copyMessage = async () => {
 				try {
-					await navigator.clipboard.writeText(richHtml === null ? message.text : bubbleRef.current.innerText);
+					const hasHtml = richHtml !== null || replyParts?.some(part => part.html !== null);
+					await navigator.clipboard.writeText(hasHtml ? bubbleRef.current.innerText : message.text);
 					setCopyStatus({ text: message.text, label: "已复制" });
 				} catch {
 					setCopyStatus({ text: message.text, label: "复制失败" });
@@ -2068,7 +2069,11 @@ function projectScene(items, characterNames, initialNames, override) {
 			const showSwipe = props.isLastAssistant && props.swipe !== void 0 && props.swipe.count > 1;
 			const showRetry = props.isLastAssistant && !props.running;
 			const streaming = message.status === "streaming";
-			const richHtml = (0, react.useMemo)(() => looksLikeHtml(message.text) ? sanitizeMessageHtml(message.text) : null, [message.text]);
+			const richHtml = (0, react.useMemo)(() => !message.replyParts && looksLikeHtml(message.text) ? sanitizeMessageHtml(message.text) : null,
+				[message.replyParts, message.text]);
+			const replyParts = (0, react.useMemo)(() => message.replyParts?.map(part => ({
+				...part, html: looksLikeHtml(part.text) ? sanitizeMessageHtml(part.text) : null
+			})), [message.replyParts]);
 			const startEdit = () => {
 				setDraft(message.stepText ?? message.text);
 				setEditing(true);
@@ -2112,6 +2117,22 @@ function projectScene(items, characterNames, initialNames, override) {
 								children: "取消"
 							})]
 						})]
+					}) : replyParts ? (0, react_jsx_runtime.jsx)("div", {
+						className: TavernView_module_css_default.msgBubble,
+						ref: bubbleRef,
+						children: replyParts.map((part, index) => (0, react_jsx_runtime.jsxs)("div", {
+							style: index > 0 ? { marginTop: "0.9em" } : void 0,
+							children: [
+								part.label && (0, react_jsx_runtime.jsx)("div", {
+									style: { fontWeight: 600, marginBottom: "0.2em" },
+									children: part.label
+								}),
+								part.html === null ? part.text : (0, react_jsx_runtime.jsx)("div", {
+									className: TavernView_module_css_default.msgRich,
+									dangerouslySetInnerHTML: { __html: part.html }
+								})
+							]
+						}, index))
 					}) : richHtml !== null ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
 						className: `${TavernView_module_css_default.msgBubble} ${TavernView_module_css_default.msgRich}`,
 						ref: bubbleRef,
@@ -2166,7 +2187,7 @@ function projectScene(items, characterNames, initialNames, override) {
 								type: "button",
 								className: TavernView_module_css_default.msgActionBtn,
 								onClick: startEdit,
-								title: message.kind === "user" ? "修改这条消息并重新生成" : "直接修改这条回复",
+								title: message.kind === "user" ? "修改这条消息并重新生成" : message.replyParts ? "编辑这一轮的模型正文" : "直接修改这条回复",
 								children: "✎ 编辑"
 							}),
 							props.swipe?.error !== void 0 && props.isLastAssistant && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
@@ -3917,6 +3938,7 @@ function projectScene(items, characterNames, initialNames, override) {
 						out.push({
 							id: `${key}#${index}`,
 							kind: "assistant",
+							turn: data.turn,
 							...run.name !== void 0 ? { name: run.name } : {},
 							text: run.text,
 							...run.narrator ? { narrator: true } : {},
@@ -3933,6 +3955,59 @@ function projectScene(items, characterNames, initialNames, override) {
 			}
 			flushRoleReplies();
 			return out;
+		}
+		/** The scene is projected from individual speaker rows; the chat displays each turn once. */
+		function groupTurnReplies(rows) {
+			const messages = [];
+			let group = [];
+			let previousRowId = null;
+			let turn;
+			const flush = () => {
+				if (group.length === 0) return;
+				const id = "tavern-turn:" + JSON.stringify([previousRowId, turn]);
+				if (group.length === 1) {
+					messages.push({ ...group[0], id });
+				} else {
+					const bodyRows = group.filter(row => row.text !== "");
+					const primary = bodyRows.findLast(row => !row.narrator) ?? bodyRows.at(-1) ?? group.at(-1);
+					const owner = group.findLast(row => row.messageId !== void 0);
+					const status = ["streaming", "error", "stopped", "truncated"]
+						.map(status => group.findLast(row => row.status === status)).find(Boolean) ?? group.at(-1);
+					const thinking = group.map(row => row.thinking).filter(Boolean).join("\n\n");
+					const authors = new Set(bodyRows.map(row => row.name).filter(Boolean));
+					const replyParts = bodyRows.map(row => ({
+						text: row.text, label: authors.size > 1 ? row.name : void 0
+					}));
+					const text = replyParts.map(part => part.label ? part.label + "\n" + part.text : part.text).join("\n\n");
+					messages.push({
+						...primary, id, turn, text,
+						replyParts: replyParts.length > 1 ? replyParts : void 0,
+						thinking: thinking || void 0,
+						status: status.status,
+						errorText: status.errorText,
+						messageId: owner?.messageId,
+						stepText: owner?.stepText ?? owner?.text,
+						roleReplyTurn: group.at(-1).roleReplyTurn
+					});
+				}
+				group = [];
+			};
+			for (const row of rows) {
+				const rowTurn = row.turn ?? row.roleReplyTurn;
+				if (row.kind === "user" || typeof rowTurn !== "number") {
+					flush();
+					messages.push(row);
+					previousRowId = row.id;
+					continue;
+				}
+				if (turn !== rowTurn) {
+					flush();
+					turn = rowTurn;
+				}
+				group.push(row);
+			}
+			flush();
+			return messages;
 		}
 		/** Load the full tavern state snapshot. */
 		async function loadState(api) {
@@ -4277,7 +4352,8 @@ function projectScene(items, characterNames, initialNames, override) {
 				const sceneRows = new Map(projected.rows.map(row => [row.id, row]));
 				return {
 					...projected,
-					rows: rows.map(row => row.narrator ? { ...row, name: "旁白", speakerNames: [] } : sceneRows.get(row.id) ?? row)
+					rows: groupTurnReplies(rows.map(row => row.narrator
+						? { ...row, name: "旁白", speakerNames: [] } : sceneRows.get(row.id) ?? row))
 				};
 			}, [chatSnapshot, characterNames, activePlay, state]);
 			const messages = sceneProjection.rows;
@@ -4285,9 +4361,9 @@ function projectScene(items, characterNames, initialNames, override) {
 			const running = (sessionSnapshot?.running ?? false) || chatSnapshot !== void 0 && chatSnapshot.legacy.partial !== null;
 			const [advancedFrom, setAdvancedFrom] = (0, react.useState)(void 0);
 			const lastMessage = messages.at(-1);
-			const replyMessageId = lastMessage?.messageId ?? (typeof lastMessage?.roleReplyTurn === "number"
+			const replyMessageId = (typeof lastMessage?.roleReplyTurn === "number"
 				? chatSnapshot?.legacy.nodes.findLast(node => node.kind === "assistant" &&
-					node.turn === lastMessage.roleReplyTurn && node.messageId !== void 0)?.messageId : void 0);
+					node.turn === lastMessage.roleReplyTurn && node.messageId !== void 0)?.messageId : void 0) ?? lastMessage?.messageId;
 			const replyKey = replyMessageId === void 0 || displaySessionId === void 0
 				? void 0 : JSON.stringify([displaySessionId, replyMessageId]);
 			const swipe = (0, react.useMemo)(() => {

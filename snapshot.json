@@ -9,7 +9,7 @@
   "files": {
     "dist/dsh-tavern/LICENSE": "974324725104c692c1320a6d36b2b832f6aa648ba5312fd89788862c91e8c703",
     "dist/dsh-tavern/cordis.patch.yml": "03367517107349293495084642a41090ec4cf0cf72ba285707193a8aa233d140",
-    "dist/dsh-tavern/lib/client.js": "f42e1f94eb74bfb83ff2df16afaaeee73bc0a8c07fd3ae7b17e9c9055dbb66c3",
+    "dist/dsh-tavern/lib/client.js": "7290f20fc709ff9983d2781b7369427251bd69b8afcf768e4c3853611eb5dfb8",
     "dist/dsh-tavern/lib/index.d.ts": "86d54e424d5034db567dadf626688b2f8bb5327f8ac11a42edfe26c16cff2068",
     "dist/dsh-tavern/lib/index.js": "b08a59aa66438610c2bb8474b30e72cc195201a868a3ac3d408c9fc143e547c2",
     "dist/dsh-tavern/package.json": "7aaef38d67ac1258674a174c8fdefdbe313dc80efc0857b4c105535f5881c118",

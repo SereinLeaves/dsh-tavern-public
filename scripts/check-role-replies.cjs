@@ -6,7 +6,7 @@ const source = fs.readFileSync(process.argv[2] ?? path.join(__dirname, '../dist/
 const start = source.indexOf('function blocksToText(');
 const end = source.indexOf('/** Load the full tavern state snapshot.', start);
 assert.ok(start >= 0 && end > start);
-const extractMessages = Function(source.slice(start, end) + '\nreturn extractMessages;')();
+const {extractMessages, groupTurnReplies} = Function(source.slice(start, end) + '\nreturn {extractMessages, groupTurnReplies};')();
 
 const characters = new Map([['role-a', '甲'], ['role-b', '乙----旧称']]);
 const text = text => ({ type: 'text', text });
@@ -91,4 +91,22 @@ assert.equal(consolidated[0].thinking, '确认角色后调用工具。');
 assert.equal(consolidated[1].name, '甲');
 assert.equal(consolidated[1].text, '[状态：完成]\n[进度：20%]\n[天气：晴]\n[时间：下午]\n[地点：走廊]\n[物品：钥匙]\n动作：她开门。\n语言：“等等……”');
 assert.equal(consolidated[1].stepText, editedQuote.data.blocks[0].text);
+const labeled = list => list.map(row => row.narrator ? {...row, name: '旁白', speakerNames: []} : row);
+const card = groupTurnReplies(labeled(consolidated));
+assert.equal(card.length, 1);
+assert.equal(card[0].name, '甲');
+assert.deepEqual(card[0].replyParts.map(part => [part.label, part.text]), [
+  ['旁白', consolidated[0].text], ['甲', consolidated[1].text]
+]);
+assert.equal(card[0].thinking, consolidated[0].thinking);
+assert.equal(card[0].stepText, consolidated[1].stepText);
+assert.equal(card[0].messageId, 'director-msg');
+const roleOnlyCard = groupTurnReplies(rows(role))[0];
+assert.equal(roleOnlyCard.id, groupTurnReplies(labeled(rows(role, narration)))[0].id);
+assert.equal(roleOnlyCard.roleReplyTurn, 1);
+assert.equal(groupTurnReplies(rows(role, director('新一轮。', {turn: 2}))).length, 2);
+assert.deepEqual(groupTurnReplies(rows(role, steering, narration)).map(row => row.kind), ['assistant', 'user', 'assistant']);
+const runningCard = groupTurnReplies(labeled(rows(role, director('他还在等待。', {status: 'running'}))));
+assert.equal(runningCard.length, 1);
+assert.equal(runningCard[0].status, 'streaming');
 console.log('PASS Tavern role results, director narration, same-turn quotation, streaming, legacy names and failed/unrelated tools.');
