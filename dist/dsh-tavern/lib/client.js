@@ -3757,10 +3757,33 @@ function projectScene(items, characterNames, initialNames, override) {
 				roleReplyTurn: node.location?.turn?.turn ?? null
 			};
 		}
-		/** Match a director's verbatim quote across whitespace and quote style changes. */
+		function normalizeDialogueLine(line) {
+			return line.replace(/\s+/g, "").replace(/[“”]/g, '"').replace(/…+|\.{3,}/g, "…");
+		}
+		/** Match a director's verbatim quote across whitespace and punctuation changes. */
 		function normalizeDialogue(text) {
-			const lines = text.split("\n").map(line => line.replace(/\s+/g, "").replace(/[“”]/g, '"')).filter(Boolean);
+			const lines = text.split("\n").map(normalizeDialogueLine).filter(Boolean);
 			return "\n" + lines.join("\n") + "\n";
+		}
+		/** Restore leading lines omitted from a named, nearly complete quotation. */
+		function restoreRoleReplyPrefix(run, pendingRoleReplies) {
+			if (run.name === void 0 || pendingRoleReplies.length === 0) return run.text;
+			const directorLines = run.text.split("\n").map(normalizeDialogueLine).filter(Boolean);
+			for (let index = 0; index < pendingRoleReplies.length; index++) {
+				const reply = pendingRoleReplies[index];
+				if (reply.name !== run.name) continue;
+				const lines = reply.text.split("\n");
+				const normalized = lines.map(normalizeDialogueLine);
+				const prefixLength = normalized.indexOf(directorLines[0]);
+				if (prefixLength <= 0) continue;
+				const quotedLines = normalized.slice(prefixLength).filter(Boolean);
+				// Require a contiguous match through the role's last line, not just repeated status fields.
+				if (quotedLines.length < 3 || quotedLines.length < normalized.filter(Boolean).length * 0.75 ||
+					!quotedLines.every((line, lineIndex) => line === directorLines[lineIndex])) continue;
+				pendingRoleReplies.splice(index, 1);
+				return lines.slice(0, prefixLength).join("\n") + "\n" + run.text;
+			}
+			return run.text;
 		}
 		/**
 		* Project ordered user/assistant rows from the session's Chat target snapshot,
@@ -3852,7 +3875,7 @@ function projectScene(items, characterNames, initialNames, override) {
 							id: `${key}#${index}`,
 							kind: "assistant",
 							...run.name !== void 0 ? { name: run.name } : {},
-							text: run.text,
+							text: data.status === "running" ? run.text : restoreRoleReplyPrefix(run, pendingRoleReplies),
 							...thinking !== "" && index === 0 ? { thinking } : {},
 							status: isTail ? status : "done",
 							...isTail && errorText !== void 0 ? { errorText } : {},

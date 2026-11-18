@@ -44,6 +44,19 @@ const steering = { ...user, key: 'steering', kind: 'steering' };
 assert.deepEqual(rows(role, steering, narration).map(row => row.id), ['role-1', 'steering', 'director-1-2#0']);
 assert.deepEqual(rows(role).map(row => row.id), ['role-1']);
 assert.equal(rows(role, director('甲：\n她轻声说。\n"我愿意。"\n门开了。')).length, 1);
+
+const originalRole = tool('summary-role', '角色：[提示：任务已完成]\n[状态：晴]\n动作：她开门。\n语言：“等等……”', { characterId: 'role-a' });
+const quotedDirector = '楼下有响动。\n\n甲：\n[状态：晴]\n动作：她开门。\n语言："等等......"\n\n雨停了。';
+const merged = rows(originalRole, director(quotedDirector));
+assert.deepEqual(merged.map(row => [row.name, row.text]), [
+  [undefined, '楼下有响动。'],
+  ['甲', '[提示：任务已完成]\n[状态：晴]\n动作：她开门。\n语言："等等......"\n\n雨停了。']
+]);
+assert.equal(merged[1].stepText, quotedDirector);
+assert.equal(merged[1].messageId, 'director-msg');
+assert.equal(rows(originalRole, director(quotedDirector.replace('等等', '快走'))).length, 3);
+assert.equal(rows(originalRole, director(quotedDirector.replace('甲：', '乙----旧称：'))).length, 3);
+assert.equal(rows(originalRole, director(quotedDirector, { status: 'running' })).length, 3);
 assert.deepEqual(rows(role, director('甲：她轻声说。\n“我愿意。”', { status: 'running' })).map(row => row.status), ['streaming', 'done']);
 assert.equal(rows(role, director('甲：她轻声说。\n“我愿意。”', { turn: 2 })).length, 2);
 assert.equal(rows(tool('brief', '角色：好', { characterId: 'role-a' }), director('很好。')).length, 2);
