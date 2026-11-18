@@ -3724,17 +3724,61 @@ function projectScene(items, characterNames, initialNames, override) {
 			})).filter((run) => run.text !== "");
 			return out.length > 0 ? out : [{ text: text.trim() }];
 		}
+		/** Read a completed Tavern role's dialogue from the host's tool-call row. */
+		function tavernRoleReply(node, charactersById) {
+			const result = node.data.root;
+			if (result?.kind !== "tool-result" || result.name !== "tavern_speak" || result.isError) return;
+			let args;
+			try {
+				args = JSON.parse(result.call?.argsRaw ?? "{}");
+			} catch {
+				args = {};
+			}
+			const requestedName = typeof args?.characterName === "string" ? args.characterName : void 0;
+			let name = charactersById.get(args?.characterId) ?? requestedName?.trim();
+			if (name && typeof args?.characterId !== "string") {
+				const names = [...charactersById.values()];
+				if (!names.includes(name)) {
+					const matches = names.filter(candidate => candidate.split("----", 1)[0].trim() === name);
+					if (matches.length === 1) name = matches[0];
+				}
+			}
+			const rendered = blocksToText(result.content);
+			const prefix = (requestedName ?? "角色") + "：";
+			const text = (rendered.startsWith(prefix) ? rendered.slice(prefix.length) : rendered).trim();
+			if (text === "") return;
+			return {
+				id: node.key,
+				kind: "assistant",
+				name: name || "角色发言",
+				speakerNames: name ? [name] : [],
+				text,
+				status: "done",
+				roleReplyTurn: node.location?.turn?.turn ?? null
+			};
+		}
+		/** Match a director's verbatim quote across whitespace and quote style changes. */
+		function normalizeDialogue(text) {
+			const lines = text.split("\n").map(line => line.replace(/\s+/g, "").replace(/[“”]/g, '"')).filter(Boolean);
+			return "\n" + lines.join("\n") + "\n";
+		}
 		/**
 		* Project ordered user/assistant rows from the session's Chat target snapshot,
 		* attaching per-row generation status (streaming / stopped / truncated / error)
 		* and thinking text from the chat node's turn metadata.
 		*/
-		function extractMessages(snapshot, characterNames) {
+		function extractMessages(snapshot, characterNames, charactersById) {
 			const turnMarks = /* @__PURE__ */ new Map();
+			const settledSteps = new Map();
 			for (const key of snapshot.order) {
 				const node = snapshot.nodes.get(key);
 				if (node === void 0) continue;
 				const data = node.data;
+				if (node.kind === "assistant-step" && data.status !== "running") {
+					let steps = settledSteps.get(data.turn);
+					if (steps === void 0) settledSteps.set(data.turn, steps = []);
+					steps.push(data);
+				}
 				if (node.kind === "turn-max-tokens" && typeof data.turn === "number") turnMarks.set(data.turn, {
 					...turnMarks.get(data.turn),
 					truncated: true
@@ -3761,6 +3805,15 @@ function projectScene(items, characterNames, initialNames, override) {
 						status: "done",
 						messageId: node.id
 					});
+				} else if (node.kind === "tool-call") {
+					const reply = tavernRoleReply(node, charactersById);
+					if (reply === void 0) continue;
+					const normalized = normalizeDialogue(reply.text);
+					const step = node.location?.step?.step;
+					const quoted = settledSteps.get(reply.roleReplyTurn)?.some(data =>
+						data.step > step && splitSpeakerRuns(joinBlocks(data.blocks ?? [], "text"), characterNames)
+							.some(run => normalizeDialogue(run.text).includes(normalized)));
+					if (!quoted) out.push(reply);
 				} else if (node.kind === "assistant-step") {
 					const data = node.data;
 					const blocks = data.blocks ?? [];
@@ -4123,10 +4176,12 @@ function projectScene(items, characterNames, initialNames, override) {
 				};
 			}, []);
 			const sceneProjection = (0, react.useMemo)(() => {
-				const nameFor = id => state?.characters.find(character => character.id === id)?.card.data.name;
+				const charactersById = new Map(state?.characters.map(character => [character.id, character.card.data.name]));
+				const nameFor = id => charactersById.get(id);
+				const rows = chatSnapshot === void 0 ? [] : extractMessages(chatSnapshot, characterNames, charactersById);
 				const override = activePlay?.sceneOverride;
-				return projectScene(
-					chatSnapshot === void 0 ? [] : extractMessages(chatSnapshot, characterNames),
+				const projected = projectScene(
+					rows.filter(row => row.roleReplyTurn === void 0),
 					characterNames,
 					(activePlay?.characterIds.slice(0, 1) ?? []).map(nameFor).filter(Boolean),
 					override ? {
@@ -4134,22 +4189,27 @@ function projectScene(items, characterNames, initialNames, override) {
 						names: override.characterIds.map(nameFor).filter(Boolean),
 						activeName: nameFor(override.activeCharacterId)
 					} : void 0);
+				const sceneRows = new Map(projected.rows.map(row => [row.id, row]));
+				return { ...projected, rows: rows.map(row => sceneRows.get(row.id) ?? row) };
 			}, [chatSnapshot, characterNames, activePlay, state]);
 			const messages = sceneProjection.rows;
 			const sceneIdsFor = names => state?.characters.filter(character => names.includes(character.card.data.name)).map(character => character.id) ?? [];
 			const running = (sessionSnapshot?.running ?? false) || chatSnapshot !== void 0 && chatSnapshot.legacy.partial !== null;
 			const [advancedFrom, setAdvancedFrom] = (0, react.useState)(void 0);
 			const lastMessage = messages.at(-1);
-			const replyKey = lastMessage?.messageId === void 0 || displaySessionId === void 0
-				? void 0 : JSON.stringify([displaySessionId, lastMessage.messageId]);
+			const replyMessageId = lastMessage?.messageId ?? (typeof lastMessage?.roleReplyTurn === "number"
+				? chatSnapshot?.legacy.nodes.findLast(node => node.kind === "assistant" &&
+					node.turn === lastMessage.roleReplyTurn && node.messageId !== void 0)?.messageId : void 0);
+			const replyKey = replyMessageId === void 0 || displaySessionId === void 0
+				? void 0 : JSON.stringify([displaySessionId, replyMessageId]);
 			const swipe = (0, react.useMemo)(() => {
 				if (playId === null || state === null || running || replyKey === void 0 ||
 					replyKey === advancedFrom || lastMessage?.kind !== "assistant") return void 0;
 				const branches = state.swipes.filter(branch =>
-					branch.playId === playId && branch.assistantMessageId === lastMessage.messageId);
+					branch.playId === playId && branch.assistantMessageId === replyMessageId);
 				if (branches.length === 0) return void 0;
 				return branches.reduce((a, b) => a.updatedAt >= b.updatedAt ? a : b);
-			}, [state, playId, running, replyKey, advancedFrom, lastMessage]);
+			}, [state, playId, running, replyKey, advancedFrom, lastMessage, replyMessageId]);
 			const [branching, setBranching] = (0, react.useState)(false);
 			const branchPending = (0, react.useRef)(false);
 			(0, react.useEffect)(() => {
