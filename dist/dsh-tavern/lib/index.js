@@ -2630,6 +2630,10 @@ function resolveModel(deps, preset, play) {
 		maxTokens
 	};
 }
+function matchesModelRoute(selection, target) {
+	return selection?.provider === target.provider && selection?.model === target.model &&
+		(target.reasoningEffort === void 0 || selection?.reasoningEffort === target.reasoningEffort);
+}
 /**
 * Build a balanced completed-turn seed carrying the greeting.
 *
@@ -3192,7 +3196,35 @@ var TavernSessionRuntime = class {
         const result = await backend.compactNow(handle.agent, AbortSignal.timeout(180000));
         return { compacted: result !== null, items: result?.shadowedSeqs.length ?? 0, estimatedTokens: result?.shadowedTokenCount ?? 0 };
     }
-    async attachExisting(agent, system, loreContext, tools) {
+    playModel(play) {
+        const storage = this.deps.storage;
+        const current = storage.getPlay(play.id) ?? play;
+        return resolveModel(this.deps, storage.getPreset(current.presetId), current);
+    }
+    bindModelRoute(agentCtx, agent, play, track) {
+        const sync = target => {
+            if (!target.provider || !target.model || matchesModelRoute(agent.model.current(), target)) return;
+            const { provider, model, reasoningEffort } = target;
+            agent.model.select({ provider, model, ...(reasoningEffort === void 0 ? {} : { reasoningEffort }) });
+        };
+        // A resumed agent prefers its durable selection to creation options.
+        // Reconcile before publication and before the loop freezes each claimed input's route.
+        track(agentCtx.on("agent/inbox/claimed", ({ agent: owner }) => {
+            if (owner === agent) sync(this.playModel(play));
+        }));
+        track(agentCtx.on("agent/request", async ({ agent: owner }, next) => {
+            const request = await next();
+            if (owner !== agent) return request;
+            const target = this.playModel(play);
+            if (!target.provider || !target.model || matchesModelRoute(request, target)) return request;
+            // A selection changed after step preparation. The host cannot change
+            // adapters mid-step, so stop before submitting the mismatched request.
+            sync(target);
+            throw conflict("酒馆模型设置已重新同步，请重试本轮");
+        }));
+        sync(this.playModel(play));
+    }
+    async attachExisting(agent, system, loreContext, tools, play) {
         if (agent.status !== "idle") throw conflict("这份会话正在其他入口输出，请等待完成后再打开酒馆");
         const cleanup = [];
         const dispose = async () => {
@@ -3203,7 +3235,7 @@ var TavernSessionRuntime = class {
         };
         try {
             if (typeof agent.runMaintenance !== "function") throw conflict("当前活动会话暂不支持安全接入，请先保留草稿后正常重开 DSH");
-            await agent.runMaintenance(() => this.sessionSetup(void 0, system, loreContext, tools, cleanup)(agent.ctx, agent));
+            await agent.runMaintenance(() => this.sessionSetup(void 0, system, loreContext, tools, play, cleanup)(agent.ctx, agent));
             return { agent, borrowed: true, dispose };
         } catch (error) {
             await dispose();
@@ -3391,7 +3423,7 @@ var TavernSessionRuntime = class {
 		this.assertActive(play.id, epoch);
 		const persisted = await this.persistedSession(sessionId);
 		this.assertActive(play.id, epoch);
-		const setup = this.sessionSetup(persisted.preset ?? "tavern", directorSystem, loreContext, [this.speakToolDefinition(), this.memoryReviewTool()]);
+		const setup = this.sessionSetup(persisted.preset ?? "tavern", directorSystem, loreContext, [this.speakToolDefinition(), this.memoryReviewTool()], play);
 		const agentOptions = {
 			...model.provider === void 0 ? {} : { provider: model.provider },
 			...model.model === void 0 ? {} : { model: model.model },
@@ -3399,7 +3431,7 @@ var TavernSessionRuntime = class {
 		};
 		let handle;
         const existingAgent = this.deps.agents.get?.(sessionId);
-        if (existingAgent) handle = await this.attachExisting(existingAgent, directorSystem, loreContext, [this.speakToolDefinition(), this.memoryReviewTool()]);
+        if (existingAgent) handle = await this.attachExisting(existingAgent, directorSystem, loreContext, [this.speakToolDefinition(), this.memoryReviewTool()], play);
 		else if (persisted.exists) {
 			handle = await this.deps.agents.resume({
 				resumeSessionId: sessionId,
@@ -3482,7 +3514,7 @@ var TavernSessionRuntime = class {
 	* @param loreContext - the world-book dynamic context.
 	* @param speakTool - agent-scoped tool to register, or undefined.
 	*/
-	sessionSetup(presetId, system, loreContext, speakTool, cleanup) {
+	sessionSetup(presetId, system, loreContext, speakTool, play, cleanup) {
 		return async (agentCtx, agent) => {
 			if (presetId !== void 0) try {
 				await this.deps.agentPresets.mount(agentCtx, presetId);
@@ -3509,6 +3541,7 @@ var TavernSessionRuntime = class {
                     return tool.name === "tavern_speak" ? current.multiAgent === true : current.characterIds.some(id => activeCharacterMemory(current, id)?.autoReview?.enabled);
                 }
             }));
+            if (agent && play) this.bindModelRoute(agentCtx, agent, play, track);
 		};
 	}
 	/**
@@ -3941,7 +3974,7 @@ var TavernSessionRuntime = class {
 		this.assertActive(play.id, epoch);
 		const persisted = await this.persistedSession(sessionId);
 		this.assertActive(play.id, epoch);
-		const setup = this.sessionSetup(persisted.preset ?? "tavern", system, loreContext);
+		const setup = this.sessionSetup(persisted.preset ?? "tavern", system, loreContext, void 0, play);
 		const agentOptions = {
 			...model.provider === void 0 ? {} : { provider: model.provider },
 			...model.model === void 0 ? {} : { model: model.model },
@@ -3949,7 +3982,7 @@ var TavernSessionRuntime = class {
 		};
 		let handle;
         const existingAgent = this.deps.agents.get?.(sessionId);
-        if (existingAgent) handle = await this.attachExisting(existingAgent, system, loreContext);
+        if (existingAgent) handle = await this.attachExisting(existingAgent, system, loreContext, void 0, play);
 		else if (persisted.exists) {
 			handle = await this.deps.agents.resume({
 				resumeSessionId: sessionId,
@@ -4038,13 +4071,13 @@ var TavernSessionRuntime = class {
                 const target = resolveModel(this.deps, this.deps.storage.getPreset(updated.presetId), updated);
                 const changingModel = prevTarget.provider !== target.provider || prevTarget.model !== target.model || prevTarget.maxTokens !== target.maxTokens;
                 const plans = [];
-                if (changingModel) {
+                for (const { agent } of handles) {
+                    const previous = agent.model?.current() ?? prevTarget;
+                    if (!changingModel && matchesModelRoute(previous, target)) continue;
                     if (!target.provider || !target.model) throw badRequest("没有可用模型，请先配置模型供应商");
-                    for (const handle of handles) {
-                        const agent = handle.agent, options = this.liveOptions.get(agent);
-                        if (!options || typeof agent.model?.select !== "function") throw conflict("当前会话暂不能安全切换模型，请保存草稿后重新打开 DSH");
-                        plans.push({ agent, options, before: { ...options }, previous: agent.model.current() ?? prevTarget, target });
-                    }
+                    const options = this.liveOptions.get(agent);
+                    if (!options || typeof agent.model?.select !== "function") throw conflict("当前会话暂不能安全切换模型，请保存草稿后重新打开 DSH");
+                    plans.push({ agent, options, before: { ...options }, previous, target });
                 }
                 let stored = false;
                 try {

@@ -11,6 +11,7 @@ const {default:SystemPrompt}=await load('dsh-system-prompt');
 const {default:Tools}=await load('dsh-tools');
 const {default:AgentLoop}=await load('dsh-agent-loop');
 const Persistence=await load('dsh-session-persistence-jsonl');
+const NativeExecutor=await load('dsh-tool-executor-native');
 import {mkdtemp,rm,writeFile,readFile,readdir} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
@@ -23,12 +24,13 @@ try {
  for(const [plugin,config] of [[SessionStore,{}],[Agents,{}],[Projections,{}],[Llm,{}],[SystemPrompt,{includeHarnessIdentity:false,includeRuntimeContext:false,personaPrefix:'',personaSuffix:''}],[Tools,{}],[Persistence,{root:join(directory,'sessions'),compression:'zstd',listConcurrency:2}],[AgentLoop,{agents:[],maxParallelToolCalls:2}]]) {
   const fiber=ctx.plugin(plugin,config);await fiber.await();
  }
+ await ctx.plugin(NativeExecutor.default??NativeExecutor).await();
  console.log('SERVICES',!!ctx.agents,!!ctx.sessionPersistence,!!ctx.agentLoop);
  const code=await readFile(new URL('../dist/dsh-tavern/lib/index.js',import.meta.url),'utf8');
  await writeFile(join(directory,'tavern.mjs'),code+'\nexport {TavernSessionRuntime,LibraryStore,TavernStorage,greetingSeed};');
  const {TavernSessionRuntime:Runtime,LibraryStore,TavernStorage,greetingSeed}=await import(pathToFileURL(join(directory,'tavern.mjs')));
  const library=await LibraryStore.open(join(directory,'library'),console), storage=new TavernStorage(library,{get:()=>({})});
- await storage.upsertCharacter({id:'role-a',card:{data:{name:'角色甲'}}});
+ await storage.upsertCharacter({id:'role-a',card:{data:{name:'角色甲',description:'Fixture character',personality:'',scenario:'',system_prompt:'',post_history_instructions:'',mes_example:'',first_mes:''}}});
  await storage.upsertPreset({id:'preset-a',provider:'fixture',model:'model-a',maxTokens:300});
  await storage.upsertPreset({id:'preset-b',provider:'fixture',model:'model-b',maxTokens:600});
  const play={id:'play-one',sessionId:'host-session',characterIds:['role-a'],multiAgent:true,presetId:'preset-a',title:'Original',updatedAt:'v1'};
@@ -92,6 +94,46 @@ try {
  const coldPlay=storage.getPlay(play.id);
  await rt.editAssistant(play.id,seed.find(e=>e.type==='assistant/message').data.message.id,'角色甲：冷启动编辑。');
  assert.notEqual(storage.getPlay(play.id).sessionId,coldPlay.sessionId);
+ // Replay a persisted route override and capture actual outbound request options.
+ const routedPlay={...play,id:'route-replay',sessionId:'host-route-replay',multiAgent:false,updatedAt:'route-v1'};
+ await storage.upsertPlay(routedPlay);
+ const staleRoute={provider:'legacy-provider',model:'legacy-model',reasoningEffort:'high'};
+ const fixtureCharacter=storage.getCharacter('role-a');
+ const priorDirector=(await rt.ensureDirector(routedPlay,seed)).agent;
+ const priorRole=(await rt.ensureRoleAgent(routedPlay,fixtureCharacter)).agent;
+ for(const agent of [priorDirector,priorRole]) agent.model.select(staleRoute);
+ await rt.dropPlay(routedPlay.id);
+ await ctx.sessionPersistence.flush();
+ const director=(await rt.ensureDirector(routedPlay)).agent;
+ const actor=(await rt.ensureRoleAgent(routedPlay,fixtureCharacter)).agent;
+ const expectedRoute={provider:'fixture',model:'model-a'};
+ assert.deepEqual(director.model.current(),expectedRoute,'Resumed director must follow the preset');
+ assert.deepEqual(actor.model.current(),expectedRoute,'Resumed role must follow the preset');
+ assert.ok(director.session.snapshotEvents().some(e=>e.type==='model/selection' && e.data.model==='legacy-model'),'Audit history must remain intact');
+ const calls=[];
+ const stream=ctx.llm.stream;
+ const resolveModelInfo=ctx.llm.resolveModelInfo;
+ ctx.llm.resolveModelInfo=async()=>({context:{contextWindow:16384},defaultMaxTokens:512});
+ ctx.llm.stream=async function*(request){
+  calls.push({provider:request.provider,model:request.model});
+  yield {type:'text-delta',index:0,text:'Fixture response'};
+  yield {type:'finish',reason:'stop'};
+ };
+ try {
+  for(const agent of [director,actor]){
+   agent.model.select(staleRoute);
+   agent.followup({id:crypto.randomUUID(),role:'user',content:[{type:'text',text:'Fixture input'}],source:{kind:'user'}});
+   await agent.whenIdle();
+  }
+  assert.deepEqual(calls,[expectedRoute,expectedRoute],'Actual director and role requests must follow the preset, including after live drift');
+ } finally {
+  ctx.llm.stream=stream;
+  ctx.llm.resolveModelInfo=resolveModelInfo;
+ }
+ director.model.select(staleRoute);
+ await rt.updatePlaySettings(routedPlay,{...routedPlay,title:'Re-save existing setting',updatedAt:'route-v2'});
+ assert.deepEqual(director.model.current(),expectedRoute,'Re-saving an unchanged configured route repairs drift');
+ console.log('PASS Tavern model routing: durable override repair on director and role resume, actual offline request routes, and re-save after live drift.');
  // A regular Chat controller may already own the exact persisted Session.
  const observedPlay={...play,id:'observed-play',sessionId:'host-observed',updatedAt:'observed-v1'};
  await storage.upsertPlay(observedPlay);
