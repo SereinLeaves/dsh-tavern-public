@@ -3760,30 +3760,70 @@ function projectScene(items, characterNames, initialNames, override) {
 		function normalizeDialogueLine(line) {
 			return line.replace(/\s+/g, "").replace(/[“”]/g, '"').replace(/…+|\.{3,}/g, "…");
 		}
-		/** Match a director's verbatim quote across whitespace and punctuation changes. */
-		function normalizeDialogue(text) {
-			const lines = text.split("\n").map(normalizeDialogueLine).filter(Boolean);
-			return "\n" + lines.join("\n") + "\n";
+		function quoteLines(lines) {
+			return lines.map((line, index) => ({ index, text: normalizeDialogueLine(line) })).filter(line => line.text !== "");
 		}
-		/** Restore leading lines omitted from a named, nearly complete quotation. */
-		function restoreRoleReplyPrefix(run, pendingRoleReplies) {
-			if (run.name === void 0 || pendingRoleReplies.length === 0) return run.text;
-			const directorLines = run.text.split("\n").map(normalizeDialogueLine).filter(Boolean);
-			for (let index = 0; index < pendingRoleReplies.length; index++) {
-				const reply = pendingRoleReplies[index];
-				if (reply.name !== run.name) continue;
-				const lines = reply.text.split("\n");
-				const normalized = lines.map(normalizeDialogueLine);
-				const prefixLength = normalized.indexOf(directorLines[0]);
-				if (prefixLength <= 0) continue;
-				const quotedLines = normalized.slice(prefixLength).filter(Boolean);
-				// Require a contiguous match through the role's last line, not just repeated status fields.
-				if (quotedLines.length < 3 || quotedLines.length < normalized.filter(Boolean).length * 0.75 ||
-					!quotedLines.every((line, lineIndex) => line === directorLines[lineIndex])) continue;
-				pendingRoleReplies.splice(index, 1);
-				return lines.slice(0, prefixLength).join("\n") + "\n" + run.text;
+		function roleStateField(line) {
+			return /^\s*\[([^\]：:]+)[：:]/.exec(line)?.[1];
+		}
+		/** Reconcile a director quote with the completed reply for that speaker. */
+		function matchRoleQuotation(run, reply) {
+			if (run.name !== void 0 && reply.speakerNames.length && run.name !== reply.name) return;
+			const role = reply.text.split("\n");
+			const director = run.text.split("\n");
+			const original = quoteLines(role);
+			const final = quoteLines(director);
+			if (original.length === 0) return;
+			for (let skipped = 0; skipped < original.length; skipped++) {
+				const length = original.length - skipped;
+				// For a partial quote, require the same named speaker and a long common suffix through the final line.
+				if (skipped > 0 && (run.name !== reply.name || length < 3 || length < original.length * 0.75)) break;
+				const suffix = original.slice(skipped);
+				const start = final.findIndex((line, index) => line.text === suffix[0].text &&
+					suffix.every((source, offset) => final[index + offset]?.text === source.text));
+				if (start < 0) continue;
+				const prefix = director.slice(0, final[start].index);
+				const fields = new Set(prefix.map(roleStateField).filter(Boolean));
+				const seen = new Set(quoteLines(prefix).map(line => line.text));
+				const restored = role.slice(0, original[skipped].index).filter(line =>
+					!seen.has(normalizeDialogueLine(line)) && !fields.has(roleStateField(line))).join("\n").trim();
+				const end = final[start + length - 1].index + 1;
+				const tail = director.slice(end);
+				const note = tail.join("\n").trim();
+				const sceneNote = tail[0] === "" && note !== "" &&
+					note.split(/\n\s*\n/).every(paragraph => /^(?:\*\s*)?[（(][\s\S]*[）)](?:\s*\*)?$/.test(paragraph.trim()));
+				const body = (sceneNote ? director.slice(0, end).join("\n") : run.text).trim();
+				return {
+					name: run.name ?? reply.name,
+					text: [restored, body].filter(Boolean).join("\n"),
+					narration: sceneNote ? note : void 0
+				};
 			}
-			return run.text;
+		}
+		function directorReplyRuns(runs, pendingRoleReplies, hasRoleReply, streaming) {
+			const narration = [];
+			const visible = [];
+			for (const run of runs) {
+				let quote;
+				if (!streaming) {
+					for (let index = 0; index < pendingRoleReplies.length; index++) {
+						quote = matchRoleQuotation(run, pendingRoleReplies[index]);
+						if (!quote) continue;
+						pendingRoleReplies.splice(index, 1);
+						break;
+					}
+				}
+				if (quote) {
+					visible.push(quote);
+					if (quote.narration) narration.push(quote.narration);
+				} else if (hasRoleReply && run.name === void 0 && run.text !== "") {
+					narration.push(run.text);
+				} else {
+					visible.push(run);
+				}
+			}
+			if (narration.length) visible.unshift({ narrator: true, text: narration.join("\n\n") });
+			return visible;
 		}
 		/**
 		* Project ordered user/assistant rows from the session's Chat target snapshot,
@@ -3792,16 +3832,11 @@ function projectScene(items, characterNames, initialNames, override) {
 		*/
 		function extractMessages(snapshot, characterNames, charactersById) {
 			const turnMarks = /* @__PURE__ */ new Map();
-			const settledSteps = new Map();
+			const roleReplyTurns = new Set();
 			for (const key of snapshot.order) {
 				const node = snapshot.nodes.get(key);
 				if (node === void 0) continue;
 				const data = node.data;
-				if (node.kind === "assistant-step" && data.status !== "running") {
-					let steps = settledSteps.get(data.turn);
-					if (steps === void 0) settledSteps.set(data.turn, steps = []);
-					steps.push(data);
-				}
 				if (node.kind === "turn-max-tokens" && typeof data.turn === "number") turnMarks.set(data.turn, {
 					...turnMarks.get(data.turn),
 					truncated: true
@@ -3849,17 +3884,12 @@ function projectScene(items, characterNames, initialNames, override) {
 				} else if (node.kind === "tool-call") {
 					const reply = tavernRoleReply(node, charactersById);
 					if (reply === void 0) continue;
-					const normalized = normalizeDialogue(reply.text);
-					const step = node.location?.step?.step;
-					const quoted = settledSteps.get(reply.roleReplyTurn)?.some(data =>
-						data.step > step && splitSpeakerRuns(joinBlocks(data.blocks ?? [], "text"), characterNames)
-							.some(run => normalizeDialogue(run.text).includes(normalized)));
-					if (quoted) continue;
 					if (reply.roleReplyTurn === null) {
 						flushRoleReplies();
 						out.push(reply);
 					} else {
 						pendingRoleReplies.push(reply);
+						roleReplyTurns.add(reply.roleReplyTurn);
 					}
 				} else if (node.kind === "assistant-step") {
 					const data = node.data;
@@ -3880,14 +3910,16 @@ function projectScene(items, characterNames, initialNames, override) {
 						continue;
 					}
 					const displayThinking = text === "" ? thinking : [takeToolThinking(), thinking].filter(Boolean).join("\n\n");
-					const runs = splitSpeakerRuns(text, characterNames);
+					const runs = directorReplyRuns(splitSpeakerRuns(text, characterNames), pendingRoleReplies,
+						roleReplyTurns.has(data.turn), data.status === "running");
 					runs.forEach((run, index) => {
 						const isTail = index === runs.length - 1;
 						out.push({
 							id: `${key}#${index}`,
 							kind: "assistant",
 							...run.name !== void 0 ? { name: run.name } : {},
-							text: data.status === "running" ? run.text : restoreRoleReplyPrefix(run, pendingRoleReplies),
+							text: run.text,
+							...run.narrator ? { narrator: true } : {},
 							...displayThinking !== "" && index === 0 ? { thinking: displayThinking } : {},
 							status: isTail ? status : "done",
 							...isTail && errorText !== void 0 ? { errorText } : {},
@@ -4243,7 +4275,10 @@ function projectScene(items, characterNames, initialNames, override) {
 						activeName: nameFor(override.activeCharacterId)
 					} : void 0);
 				const sceneRows = new Map(projected.rows.map(row => [row.id, row]));
-				return { ...projected, rows: rows.map(row => sceneRows.get(row.id) ?? row) };
+				return {
+					...projected,
+					rows: rows.map(row => row.narrator ? { ...row, name: "旁白", speakerNames: [] } : sceneRows.get(row.id) ?? row)
+				};
 			}, [chatSnapshot, characterNames, activePlay, state]);
 			const messages = sceneProjection.rows;
 			const sceneIdsFor = names => state?.characters.filter(character => names.includes(character.card.data.name)).map(character => character.id) ?? [];
