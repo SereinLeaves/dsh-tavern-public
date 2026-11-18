@@ -3792,10 +3792,21 @@ function projectScene(items, characterNames, initialNames, override) {
 				}
 			}
 			const out = [];
+			// Keep role replies after the director's text within each conversation turn.
+			const pendingRoleReplies = [];
+			const flushRoleReplies = () => {
+				out.push(...pendingRoleReplies);
+				pendingRoleReplies.length = 0;
+			};
 			for (const key of snapshot.order) {
 				const node = snapshot.nodes.get(key);
 				if (node === void 0) continue;
-				if (node.kind === "user" || node.kind === "steering") {
+				const userInput = node.kind === "user" || node.kind === "steering";
+				const turn = node.location?.turn?.turn ?? (node.kind === "assistant-step" ? node.data.turn : void 0);
+				if (pendingRoleReplies.length && (userInput || (turn !== void 0 && turn !== pendingRoleReplies[0].roleReplyTurn))) {
+					flushRoleReplies();
+				}
+				if (userInput) {
 					const data = node.data;
 					const text = blocksToText(data.content ?? []).trim();
 					if (text !== "" && text !== "[开场] 扮演开始。") out.push({
@@ -3813,7 +3824,13 @@ function projectScene(items, characterNames, initialNames, override) {
 					const quoted = settledSteps.get(reply.roleReplyTurn)?.some(data =>
 						data.step > step && splitSpeakerRuns(joinBlocks(data.blocks ?? [], "text"), characterNames)
 							.some(run => normalizeDialogue(run.text).includes(normalized)));
-					if (!quoted) out.push(reply);
+					if (quoted) continue;
+					if (reply.roleReplyTurn === null) {
+						flushRoleReplies();
+						out.push(reply);
+					} else {
+						pendingRoleReplies.push(reply);
+					}
 				} else if (node.kind === "assistant-step") {
 					const data = node.data;
 					const blocks = data.blocks ?? [];
@@ -3847,6 +3864,7 @@ function projectScene(items, characterNames, initialNames, override) {
 					});
 				}
 			}
+			flushRoleReplies();
 			return out;
 		}
 		/** Load the full tavern state snapshot. */

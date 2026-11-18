@@ -34,11 +34,17 @@ const rows = (...nodes) => extractMessages(
 const role = tool('role-1', '角色：她轻声说。\n\n“我愿意。”', { characterId: 'role-a' });
 const narration = director('风停了下来。');
 assert.deepEqual(rows(role, narration).map(row => [row.name, row.text, row.messageId]), [
-  ['甲', '她轻声说。\n\n“我愿意。”', undefined],
-  [undefined, '风停了下来。', 'director-msg']
+  [undefined, '风停了下来。', 'director-msg'],
+  ['甲', '她轻声说。\n\n“我愿意。”', undefined]
 ]);
+const nextRole = tool('role-2', '乙：是我。', { characterName: '乙' });
+assert.deepEqual(rows(role, narration, nextRole).map(row => row.id), ['director-1-2#0', 'role-1', 'role-2']);
+assert.deepEqual(rows(role, director('新一轮。', { turn: 2 })).map(row => row.id), ['role-1', 'director-2-2#0']);
+const steering = { ...user, key: 'steering', kind: 'steering' };
+assert.deepEqual(rows(role, steering, narration).map(row => row.id), ['role-1', 'steering', 'director-1-2#0']);
+assert.deepEqual(rows(role).map(row => row.id), ['role-1']);
 assert.equal(rows(role, director('甲：\n她轻声说。\n"我愿意。"\n门开了。')).length, 1);
-assert.equal(rows(role, director('甲：她轻声说。\n“我愿意。”', { status: 'running' })).length, 2);
+assert.deepEqual(rows(role, director('甲：她轻声说。\n“我愿意。”', { status: 'running' })).map(row => row.status), ['streaming', 'done']);
 assert.equal(rows(role, director('甲：她轻声说。\n“我愿意。”', { turn: 2 })).length, 2);
 assert.equal(rows(tool('brief', '角色：好', { characterId: 'role-a' }), director('很好。')).length, 2);
 assert.deepEqual(rows(tool('legacy', '乙：是我。', { characterName: '乙' }))[0].speakerNames, ['乙----旧称']);
