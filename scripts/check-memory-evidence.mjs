@@ -1,0 +1,14 @@
+import {readFile} from 'node:fs/promises';import assert from 'node:assert/strict';
+const code=await readFile(new URL('../dist/dsh-tavern/lib/index.js',import.meta.url),'utf8');const {memoryEvidenceError,memoryReviewFailures,TavernSessionRuntime:Runtime}=await import('data:text/javascript;base64,'+Buffer.from(code+'\nexport {memoryEvidenceError,memoryReviewFailures,TavernSessionRuntime};').toString('base64'));
+const messages=[{id:'day',text:'（次日）'},{id:'intro',text:'甲说：“我是研究生，主修计算机。”随后出示证件。'}];
+assert.match(memoryEvidenceError({messageId:'day',quote:'我是研究生……主修计算机',content:'甲介绍学历'},messages),/次日/);
+assert.match(memoryEvidenceError({messageId:'missing',quote:'我是研究生',content:'甲介绍学历'},messages),/messageId/);
+assert.equal(memoryEvidenceError({messageId:'intro',quote:'我是研究生',content:'甲介绍学历'},messages),null);
+const events=[{type:'turn/start',data:{turn:2}}];
+for(let i=0;i<2;i++)events.push({type:'tool/call',data:{name:'tavern_review_memory',callId:'c'+i}},{type:'tool/result',data:{message:{toolCallId:'c'+i,isError:true}}});
+assert.equal(memoryReviewFailures(events),2);
+const play={id:'p',sessionId:'s'},agent={id:'s',session:{snapshotEvents:()=>events}},rt=new Runtime({storage:{listPlays:()=>[play]}});rt.directors.set('p',{agent});
+assert.deepEqual(await rt.memoryReviewTool().execute({}, {agent}),{added:0,deferred:true});
+assert.match(rt.memoryReviewPrompt(play),/停止调用/);assert.match(rt.memoryReviewTool().output.render({}, {added:0,deferred:true})[0].text,/未保存/);
+events.push({type:'turn/start',data:{turn:3}});assert.equal(memoryReviewFailures(events),0);
+console.log('PASS exact quote/id diagnostics, genuine quote acceptance, two-failure stop without storage writes, next-turn reset.');

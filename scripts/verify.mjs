@@ -9,7 +9,7 @@ for(const [path,expected] of Object.entries(manifest.files)){
  if(createHash('sha256').update(bytes).digest('hex')!==expected)throw Error('Snapshot hash mismatch: '+path);
  if(path.endsWith('.js'))execFileSync(process.execPath,['--check',fileURLToPath(new URL(path,root))],{stdio:'pipe'});
 }
-for(const script of ['check-play-selection.cjs','check-lifecycle.mjs','check-speaker-routing.mjs','check-edit-draft.cjs','check-auto-memory.mjs','check-history.mjs','check-settings.mjs','check-translation.cjs','check-scene.mjs','check-scene-client.cjs','check-scene-sync.mjs']){
+for(const script of ['check-avatar-preview.cjs','check-character-search.cjs','check-character-background.cjs','check-play-selection.cjs','check-lifecycle.mjs','check-speaker-routing.mjs','check-edit-draft.cjs','check-auto-memory.mjs','check-memory-draft.mjs','check-history.mjs','check-settings.mjs','check-preset-decouple.mjs','check-translation.cjs','check-scene.mjs','check-scene-client.cjs','check-scene-sync.mjs','check-fullscreen.cjs']){
  execFileSync(process.execPath,[fileURLToPath(new URL(script,import.meta.url))],{stdio:'inherit'});
 }
 const client = await readFile(new URL('dist/dsh-tavern/lib/client.js',root),'utf8');

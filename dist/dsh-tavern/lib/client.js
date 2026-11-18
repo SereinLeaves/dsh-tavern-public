@@ -1,3 +1,37 @@
+// Storage is an append-only evidence ledger; this projection controls model context.
+function memoryTextKey(text) { return String(text ?? "").normalize("NFKC").replace(/[^\p{L}\p{N}]/gu, "").toLowerCase(); }
+function sameMemoryFact(left, right) {
+ const a = memoryTextKey(left), b = memoryTextKey(right);
+ if (a === b) return true;
+ const facts = text => (text.match(/\d+|已|未|不|无|取消|同意|拒绝/g) ?? []).join("|");
+ if (facts(a) !== facts(b)) return false;
+ if (Math.min(a.length, b.length) < 18 || Math.min(a.length,b.length) / Math.max(a.length,b.length) < 0.8) return false;
+ const grams = text => new Set(Array.from({length:text.length - 1},(_,i)=>text.slice(i,i+2)));
+ const x = grams(a), y = grams(b);
+ const common = [...x].filter(g => y.has(g)).length;
+ return 2 * common / (x.size + y.size) >= 0.9;
+}
+function automaticMemoryRecords(memory, matches = () => true) {
+ const curated = memory.curation && matches(memory.curation) ? memory.curation : null;
+ const covered = new Set(curated?.sourceIds ?? []);
+ return [...(curated?.entries ?? []), ...(memory.automaticEntries ?? []).filter(e => !covered.has(e.uid))].filter(e => !e.disable && matches(e));
+}
+function projectAutomaticMemory(memory, matches = () => true) {
+ const records = automaticMemoryRecords(memory, matches);
+ const superseded = new Set(records.flatMap(e => e.supersedes ?? []));
+ const result = [], topics = new Set(); let states = 0;
+ for (const entry of [...records].reverse()) {
+  if (superseded.has(entry.uid)) continue;
+  const state = entry.kind === "state";
+  if (state && (states >= 3 || topics.has(entry.topic))) continue;
+  if (result.some(e => state ? memoryTextKey(e.content) === memoryTextKey(entry.content) : sameMemoryFact(e.content, entry.content))) continue;
+  if (!state && (memory.book?.entries ?? []).some(e => !e.disable && sameMemoryFact(e.content, entry.content))) continue;
+  if (state) { states++; topics.add(entry.topic); }
+  result.push({...entry, constant:state, order:state ? 2000 : 75});
+ }
+ return result.reverse();
+}
+
 window.__ModuleLoader__.load({
 	id: "dsh-tavern",
 	factory: (require) => {
@@ -178,6 +212,12 @@ window.__ModuleLoader__.load({
 					method: "POST",
 					body: JSON.stringify({ characterId, expectedUpdatedAt })
 				}),
+                sendGroupMessage: (id, text) => request(`/tavern/plays/${encodeURIComponent(id)}/group-send`, {
+                    method: "POST", body: JSON.stringify({ text })
+                }),
+                draftCharacterMemory: (id, characterId) => request(`/tavern/plays/${encodeURIComponent(id)}/memory-draft`, {
+                    method: "POST", body: JSON.stringify({ characterId })
+                }),
 				updateCharacterMemory: (id, characterId, patch) => request(`/tavern/plays/${encodeURIComponent(id)}/memories/${encodeURIComponent(characterId)}`, {
 					method: "PUT",
 					body: JSON.stringify(patch)
@@ -253,13 +293,14 @@ window.__ModuleLoader__.load({
 		}
 		//#endregion
 		//#region \0dsh-css:src/client/TavernView.module.css.mjs
-		const css = ".dy0ESq_view{--tv-bg:var(--dsw-alias-bg-base);--tv-nav-bg:var(--dsw-alias-bg-module-platform);--tv-surface-card:var(--dsw-alias-bg-layer-2);--tv-surface-input:var(--dsw-specific-input-major);--tv-sidebar-fill:var(--dsw-specific-sidebar-fill);--tv-bubble-user:var(--dsw-specific-bubble);--tv-border:var(--dsw-alias-border-l2);--tv-border-strong:var(--dsw-alias-border-l3);--tv-text:var(--dsw-alias-label-primary);--tv-text-secondary:var(--dsw-alias-label-secondary);--tv-text-tertiary:var(--dsw-alias-label-tertiary);--tv-text-caption:var(--dsw-alias-label-caption);--tv-hover:var(--dsw-alias-interactive-bg-hover);--tv-active:var(--dsw-alias-interactive-bg-active);--tv-btn-bg:var(--dsw-alias-button-elevated-fill);--tv-btn-bg-hover:var(--dsw-alias-interactive-bg-hover-solid);--tv-primary-fill:var(--dsw-alias-button-primary-fill);--tv-primary-fill-hover:var(--dsw-alias-button-primary-hover);--tv-primary-text:var(--dsw-alias-label-primary-foreground);--tv-danger-fill:color-mix(in srgb, var(--dsw-alias-state-error-primary) 8%, transparent);--tv-danger-fill-hover:color-mix(in srgb, var(--dsw-alias-state-error-primary) 18%, transparent);--tv-danger-border:color-mix(in srgb, var(--dsw-alias-state-error-primary) 40%, transparent);--tv-error:var(--dsw-alias-state-error-primary);--tv-focus:var(--dsw-alias-state-business-primary);--tv-user-name:var(--dsw-alias-state-business-primary);--tv-accent:var(--dsw-static-amber-500);--tv-accent-text:var(--dsw-static-amber-600);--tv-accent-soft:color-mix(in srgb, var(--tv-accent) 12%, transparent);--tv-accent-border:color-mix(in srgb, var(--tv-accent) 32%, transparent);--tv-accent-border-strong:color-mix(in srgb, var(--tv-accent) 55%, transparent);background:radial-gradient(1200px 600px at 80% -10%, var(--tv-accent-soft), transparent 60%), var(--tv-bg);height:100%;min-height:0;color:var(--tv-text);font:var(--dsw-font-s-14);flex-direction:column;display:flex}[data-conversation-scroll] .dy0ESq_view{height:100%;overflow:hidden}.dy0ESq_nav{border-bottom:1px solid var(--tv-border);background:var(--tv-nav-bg);flex-shrink:0;align-items:center;gap:4px;padding:8px 12px;display:flex}.dy0ESq_navTitle{font:var(--dsw-font-m-18);letter-spacing:2px;color:var(--tv-accent-text);white-space:nowrap;margin-right:12px;font-weight:700}.dy0ESq_navTab{color:var(--tv-text-secondary);cursor:pointer;font:var(--dsw-font-xs-13);transition:background var(--ds-transition-duration) var(--ds-ease-in-out), color var(--ds-transition-duration) var(--ds-ease-in-out);background:0 0;border:none;border-radius:6px;padding:6px 14px}.dy0ESq_navTab:hover{background:var(--tv-hover);color:var(--tv-text)}.dy0ESq_navTabActive{background:var(--tv-accent-soft);color:var(--tv-accent-text);font-weight:600}.dy0ESq_navSpacer{flex:1}.dy0ESq_navError{color:var(--tv-error);font:var(--dsw-font-xxs-12);text-overflow:ellipsis;white-space:nowrap;max-width:40%;overflow:hidden}.dy0ESq_stylePicker{font:var(--dsw-font-xxs-12);color:var(--tv-text-tertiary);white-space:nowrap;align-items:center;gap:6px;margin-right:8px;display:inline-flex}.dy0ESq_styleSelect{background:var(--tv-surface-input);border:1px solid var(--tv-border);color:var(--tv-text-secondary);font:var(--dsw-font-xxs-12);cursor:pointer;transition:border-color var(--ds-transition-duration) var(--ds-ease-in-out), box-shadow var(--ds-transition-duration) var(--ds-ease-in-out);border-radius:6px;outline:none;padding:3px 8px;font-family:inherit}.dy0ESq_styleSelect:focus{border-color:var(--tv-focus);box-shadow:0 0 0 2px color-mix(in srgb, var(--tv-focus) 18%, transparent)}.dy0ESq_body{flex:1;min-height:0;display:flex}.dy0ESq_sidebar{border-right:1px solid var(--tv-border);background:var(--tv-sidebar-fill);flex-direction:column;flex-shrink:0;width:260px;min-height:0;display:flex}.dy0ESq_sidebarHead{border-bottom:1px solid var(--tv-border);flex-shrink:0;align-items:center;gap:8px;padding:10px 12px;display:flex}.dy0ESq_sidebarTitle{font:var(--dsw-font-xs-strong-13);color:var(--tv-accent-text);flex:1}.dy0ESq_list{flex-direction:column;flex:1;gap:4px;min-height:0;padding:6px;display:flex;overflow-y:auto}.dy0ESq_listItem{cursor:pointer;color:var(--tv-text);text-align:left;font:var(--dsw-font-xs-13);width:100%;transition:background var(--ds-transition-duration) var(--ds-ease-in-out);background:0 0;border:none;border-radius:6px;align-items:center;gap:8px;padding:7px 9px;display:flex}.dy0ESq_listItem:hover{background:var(--tv-hover)}.dy0ESq_listItemActive{background:var(--tv-accent-soft)}.dy0ESq_listItemAvatar{object-fit:cover;background:var(--tv-accent-soft);border-radius:50%;flex-shrink:0;width:30px;height:30px}.dy0ESq_listItemName{text-overflow:ellipsis;white-space:nowrap;flex:1;overflow:hidden}.dy0ESq_listItemMeta{font:var(--dsw-font-xxxs-11);color:var(--tv-text-caption)}.dy0ESq_empty{text-align:center;color:var(--tv-text-tertiary);font:var(--dsw-font-xs-13);padding:24px 12px}.dy0ESq_content{flex-direction:column;flex:1;gap:12px;min-width:0;min-height:0;padding:14px;display:flex;overflow-y:auto}.dy0ESq_grid{grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:10px;display:grid}.dy0ESq_card{border:1px solid var(--tv-border);background:var(--tv-surface-card);cursor:pointer;transition:border-color var(--ds-transition-duration) var(--ds-ease-in-out), transform var(--ds-transition-duration) var(--ds-ease-in-out), box-shadow var(--ds-transition-duration) var(--ds-ease-in-out);text-align:center;border-radius:8px;flex-direction:column;align-items:center;gap:6px;padding:10px;display:flex}.dy0ESq_card:hover{border-color:var(--tv-accent-border-strong);box-shadow:var(--dsw-shadow-lv1);transform:translateY(-1px)}.dy0ESq_cardAvatar{object-fit:cover;background:var(--tv-accent-soft);border-radius:50%;width:64px;height:64px}.dy0ESq_cardName{font:var(--dsw-font-xs-strong-13)}.dy0ESq_cardTags{font:var(--dsw-font-xxxs-11);color:var(--tv-text-tertiary);text-overflow:ellipsis;white-space:nowrap;max-width:100%;overflow:hidden}.dy0ESq_chat{flex-direction:column;flex:1;height:100%;min-height:0;display:flex}.dy0ESq_chatHead{border-bottom:1px solid var(--tv-border);flex-shrink:0;align-items:center;gap:10px;padding:8px 12px;display:flex}.dy0ESq_chatTitle{font:var(--dsw-font-m-18);font-weight:700}.dy0ESq_chatMeta{font:var(--dsw-font-xxs-12);color:var(--tv-text-caption)}.dy0ESq_messages{flex-direction:column;flex:1;gap:12px;min-height:0;padding:14px 16px;display:flex;overflow-y:auto}.dy0ESq_msg{flex-direction:column;gap:3px;max-width:85%;display:flex}.dy0ESq_msgUser{align-self:flex-end;align-items:flex-end}.dy0ESq_msgName{font:var(--dsw-font-xxs-strong-12);color:var(--tv-accent-text)}.dy0ESq_msgUser .dy0ESq_msgName{color:var(--tv-user-name)}.dy0ESq_msgBubble{background:var(--tv-surface-card);border:1px solid var(--tv-border);white-space:pre-wrap;word-break:break-word;font:var(--dsw-font-base-16);border-radius:22px;padding:10px 16px}.dy0ESq_msgRich{line-height:1.65}.dy0ESq_msgRich p{margin:0 0 .6em}.dy0ESq_msgRich p:last-child{margin-bottom:0}.dy0ESq_msgRich img{border-radius:8px;max-width:100%;height:auto;margin:4px 0;display:block}.dy0ESq_msgRich a{color:var(--tv-accent-text);text-decoration:underline}.dy0ESq_msgRich pre{background:var(--tv-surface-input);border:1px solid var(--tv-border);white-space:pre-wrap;border-radius:8px;padding:8px 10px;overflow-x:auto}.dy0ESq_msgRich code{font-family:var(--dsw-font-family-monospace,monospace);font-size:.92em}.dy0ESq_msgRich blockquote{border-left:3px solid var(--tv-accent-border-strong);color:var(--tv-text-secondary);margin:4px 0;padding:2px 10px}.dy0ESq_msgRich ul,.dy0ESq_msgRich ol{margin:4px 0;padding-left:22px}.dy0ESq_msgRich table{border-collapse:collapse;font:var(--dsw-font-xs-13);margin:6px 0}.dy0ESq_msgRich th,.dy0ESq_msgRich td{border:1px solid var(--tv-border);padding:4px 8px}.dy0ESq_msgRich hr{border:none;border-top:1px solid var(--tv-border);margin:10px 0}.dy0ESq_msgUser .dy0ESq_msgBubble{background:var(--tv-bubble-user);border:none}.dy0ESq_msgNarrator .dy0ESq_msgBubble{font:var(--dsw-font-s-14);color:var(--tv-text-secondary);background:0 0;border:none;padding:2px 4px;font-style:italic}.dy0ESq_msgNarrator .dy0ESq_msgName{color:var(--tv-text-tertiary)}.dy0ESq_msgSystem .dy0ESq_msgBubble{color:var(--tv-text-caption);font:var(--dsw-font-xxs-12);background:0 0;border:none;padding:2px 4px}.dy0ESq_msgTime{font:var(--dsw-font-xxxs-11);color:var(--tv-text-caption)}.dy0ESq_composer{border-top:1px solid var(--tv-border);background:var(--tv-nav-bg);flex-direction:column;flex-shrink:0;gap:8px;padding:10px 12px;display:flex}.dy0ESq_composerRow{align-items:center;gap:8px;display:flex}.dy0ESq_composerInput{resize:none;background:var(--tv-surface-input);border:1px solid var(--dsw-alias-border-l2-darkmode-thin);min-height:40px;max-height:120px;color:var(--tv-text);font:var(--dsw-font-s-14);transition:border-color var(--ds-transition-duration) var(--ds-ease-in-out), box-shadow var(--ds-transition-duration) var(--ds-ease-in-out);border-radius:10px;outline:none;flex:1;padding:9px 12px;font-family:inherit}.dy0ESq_composerInput:focus{border-color:var(--tv-focus);box-shadow:0 0 0 2px color-mix(in srgb, var(--tv-focus) 18%, transparent)}.dy0ESq_composerInput:disabled{opacity:.5}.dy0ESq_sendBtn{background:var(--tv-primary-fill);color:var(--tv-primary-text);cursor:pointer;height:40px;font-weight:600;font:var(--dsw-font-s-strong-14);transition:background var(--ds-transition-duration) var(--ds-ease-in-out);border:none;border-radius:10px;flex-shrink:0;padding:0 18px}.dy0ESq_sendBtn:hover:not(:disabled){background:var(--tv-primary-fill-hover)}.dy0ESq_sendBtn:disabled{opacity:.45;cursor:default}.dy0ESq_modeRow{font:var(--dsw-font-xxs-12);color:var(--tv-text-tertiary);align-items:center;gap:10px;display:flex}.dy0ESq_modeLabel{cursor:pointer;align-items:center;gap:4px;display:flex}.dy0ESq_btn{border:1px solid var(--tv-border);background:var(--tv-btn-bg);color:var(--tv-text-secondary);cursor:pointer;font:var(--dsw-font-xs-13);transition:background var(--ds-transition-duration) var(--ds-ease-in-out), color var(--ds-transition-duration) var(--ds-ease-in-out);white-space:nowrap;border-radius:6px;padding:5px 11px}.dy0ESq_btn:hover:not(:disabled){background:var(--tv-btn-bg-hover);color:var(--tv-text)}.dy0ESq_btn:disabled{opacity:.4;cursor:default}.dy0ESq_btnDanger{border-color:var(--tv-danger-border);background:var(--tv-danger-fill);color:var(--tv-error)}.dy0ESq_btnDanger:hover:not(:disabled){background:var(--tv-danger-fill-hover)}.dy0ESq_btnPrimary{background:var(--tv-primary-fill);color:var(--tv-primary-text);border-color:#0000;font-weight:600}.dy0ESq_btnPrimary:hover:not(:disabled){background:var(--tv-primary-fill-hover);color:var(--tv-primary-text)}.dy0ESq_btnGhost{color:var(--tv-text-tertiary);background:0 0;border-color:#0000;padding:4px 8px}.dy0ESq_btnGhost:hover:not(:disabled){background:var(--tv-hover);color:var(--tv-text-secondary)}.dy0ESq_field{flex-direction:column;gap:4px;display:flex}.dy0ESq_fieldLabel{font:var(--dsw-font-xxs-12);color:var(--tv-text-secondary)}.dy0ESq_fieldInput,.dy0ESq_fieldSelect,.dy0ESq_fieldTextarea{background:var(--tv-surface-input);border:1px solid var(--tv-border);color:var(--tv-text);font:var(--dsw-font-xs-13);transition:border-color var(--ds-transition-duration) var(--ds-ease-in-out), box-shadow var(--ds-transition-duration) var(--ds-ease-in-out);border-radius:6px;outline:none;padding:7px 10px;font-family:inherit}.dy0ESq_fieldInput:focus,.dy0ESq_fieldSelect:focus,.dy0ESq_fieldTextarea:focus{border-color:var(--tv-focus);box-shadow:0 0 0 2px color-mix(in srgb, var(--tv-focus) 18%, transparent)}.dy0ESq_fieldTextarea{resize:vertical;min-height:80px;line-height:1.5}.dy0ESq_row{flex-wrap:wrap;align-items:center;gap:8px;display:flex}.dy0ESq_spread{justify-content:space-between}.dy0ESq_hint{font:var(--dsw-font-xxs-12);color:var(--tv-text-tertiary);line-height:1.5}.dy0ESq_section{flex-direction:column;gap:10px;display:flex}.dy0ESq_sectionTitle{font:var(--dsw-font-xs-strong-13);color:var(--tv-accent-text);border-bottom:1px solid var(--tv-border);padding-bottom:6px}.dy0ESq_editor{flex-direction:column;gap:10px;max-width:720px;display:flex}.dy0ESq_badge{font:var(--dsw-font-xxxs-11);background:var(--tv-accent-soft);color:var(--tv-accent-text);border:1px solid var(--tv-accent-border);border-radius:10px;padding:1px 7px;display:inline-block}.dy0ESq_checkRow{font:var(--dsw-font-xs-13);cursor:pointer;align-items:center;gap:6px;display:flex}.dy0ESq_spinner{border:2px solid var(--tv-accent-border);border-top-color:var(--tv-accent);border-radius:50%;width:14px;height:14px;animation:.8s linear infinite dy0ESq_spin;display:inline-block}@keyframes dy0ESq_spin{to{transform:rotate(360deg)}}.dy0ESq_entryList{flex-direction:column;gap:6px;display:flex}.dy0ESq_entry{border:1px solid var(--tv-border);background:var(--tv-surface-card);border-radius:6px;flex-direction:column;gap:4px;padding:8px 10px;display:flex}.dy0ESq_entryKeys{font:var(--dsw-font-xxs-12);color:var(--tv-accent-text)}.dy0ESq_entryContent{font:var(--dsw-font-s-14);color:var(--tv-text-secondary);white-space:pre-wrap;max-height:120px;overflow-y:auto}.dy0ESq_entryHead{justify-content:space-between;align-items:center;gap:8px;display:flex}.dy0ESq_view :where(button,select):focus-visible{outline:1.5px solid var(--tv-focus);outline-offset:2px}.dy0ESq_view[data-style=classic]{color-scheme:dark;--tv-bg:#141210;--tv-nav-bg:#141210e6;--tv-surface-card:#00000047;--tv-surface-input:#00000059;--tv-sidebar-fill:#00000038;--tv-bubble-user:#8fb7d91f;--tv-border:#d4af3740;--tv-border-strong:#d4af3759;--tv-text:#e8e2d4;--tv-text-secondary:#c9bfa3;--tv-text-tertiary:#8d846c;--tv-text-caption:#8d846c;--tv-hover:#d4af371a;--tv-active:#d4af3733;--tv-btn-bg:#d4af371a;--tv-btn-bg-hover:#d4af3738;--tv-primary-fill:#b8962e;--tv-primary-fill-hover:#d4af37;--tv-primary-text:#201a08;--tv-danger-fill:#e06c5e14;--tv-danger-fill-hover:#e06c5e2e;--tv-danger-border:#e06c5e66;--tv-error:#e06c5e;--tv-focus:#d4af37;--tv-user-name:#8fb7d9;--tv-accent:#d4af37;--tv-accent-text:#d4af37;--tv-accent-soft:#d4af3726;--tv-accent-border:#d4af374d;--tv-accent-border-strong:#d4af37}.dy0ESq_playAvatarStack{flex-shrink:0;align-items:center;display:flex}.dy0ESq_playAvatarStack>*+*{margin-left:-8px}.dy0ESq_playAvatar{object-fit:cover;background:var(--tv-accent-soft);width:26px;height:26px;color:var(--tv-accent-text);border:2px solid var(--tv-sidebar-fill);font:var(--dsw-font-xxxs-11);border-radius:50%;justify-content:center;align-items:center;display:flex;overflow:hidden}.dy0ESq_playAvatarMore{background:var(--tv-surface-card);min-width:26px;height:26px;color:var(--tv-text-secondary);border:1px solid var(--tv-border);font:var(--dsw-font-xxxs-11);box-sizing:border-box;border-radius:999px;justify-content:center;align-items:center;padding:0 5px;display:inline-flex}.dy0ESq_listItemBody{flex-direction:column;flex:1;gap:2px;min-width:0;display:flex}.dy0ESq_playTitle{font:var(--dsw-font-xs-strong-13);color:var(--tv-text);text-overflow:ellipsis;white-space:nowrap;max-width:100%;overflow:hidden}.dy0ESq_playMeta{font:var(--dsw-font-xxxs-11);color:var(--tv-text-secondary);text-overflow:ellipsis;white-space:nowrap;max-width:100%;overflow:hidden}.dy0ESq_createSheet{border:1px solid var(--tv-border);background:color-mix(in srgb, var(--tv-surface-card) 78%, transparent);width:100%;max-width:1080px;box-shadow:var(--dsw-shadow-lv1);border-radius:14px;flex-direction:column;gap:16px;margin:0 auto;padding:18px;display:flex}.dy0ESq_createHeader{justify-content:space-between;align-items:flex-start;gap:12px;display:flex}.dy0ESq_createHeaderText{flex-direction:column;gap:4px;min-width:0;display:flex}.dy0ESq_createTitle{font:var(--dsw-font-m-18);color:var(--tv-text);font-weight:700}.dy0ESq_createSubtitle{font:var(--dsw-font-xs-13);color:var(--tv-text-secondary);max-width:760px;line-height:1.6}.dy0ESq_castCount{border:1px solid var(--tv-accent-border);background:var(--tv-accent-soft);color:var(--tv-accent-text);font:var(--dsw-font-xxs-strong-12);white-space:nowrap;border-radius:999px;flex-shrink:0;padding:5px 10px}.dy0ESq_castCountEmpty{border-color:var(--tv-border);background:var(--tv-surface-input);color:var(--tv-text-tertiary)}.dy0ESq_createBasics{grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;display:grid}.dy0ESq_createModes{grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:10px;display:grid}.dy0ESq_modeCard{text-align:left;border:1px solid var(--tv-border);background:var(--tv-surface-input);color:var(--tv-text);cursor:pointer;transition:border-color var(--ds-transition-duration) var(--ds-ease-in-out), background var(--ds-transition-duration) var(--ds-ease-in-out), box-shadow var(--ds-transition-duration) var(--ds-ease-in-out);border-radius:10px;flex-direction:column;align-items:flex-start;gap:4px;padding:10px 12px;display:flex}.dy0ESq_modeCard:hover:not(:disabled){border-color:var(--tv-accent-border-strong)}.dy0ESq_modeCard:disabled{opacity:.5;cursor:default}.dy0ESq_modeCardOn{border-color:var(--tv-accent-border-strong);background:var(--tv-accent-soft);box-shadow:inset 0 0 0 1px var(--tv-accent-border)}.dy0ESq_modeCardTitle{font:var(--dsw-font-xs-strong-13);color:var(--tv-text)}.dy0ESq_modeCardOn .dy0ESq_modeCardTitle{color:var(--tv-accent-text)}.dy0ESq_modeCardText{font:var(--dsw-font-xxs-12);color:var(--tv-text-tertiary);line-height:1.45}.dy0ESq_castPicker{border:1px solid var(--tv-border);background:color-mix(in srgb, var(--tv-surface-input) 55%, transparent);border-radius:12px;flex-direction:column;gap:10px;padding:12px;display:flex}.dy0ESq_castPickerHead{flex-wrap:wrap;justify-content:space-between;align-items:center;gap:10px;display:flex}.dy0ESq_castPickerTitleRow{flex-direction:column;gap:2px;display:flex}.dy0ESq_castPickerTitle{font:var(--dsw-font-s-strong-14);color:var(--tv-accent-text)}.dy0ESq_castPickerHint{font:var(--dsw-font-xxs-12);color:var(--tv-text-tertiary)}.dy0ESq_castPickerActions{align-items:center;gap:8px;display:flex}.dy0ESq_castSearch{background:var(--tv-surface-input);border:1px solid var(--tv-border);width:min(280px,100%);color:var(--tv-text);font:var(--dsw-font-xxs-12);transition:border-color var(--ds-transition-duration) var(--ds-ease-in-out), box-shadow var(--ds-transition-duration) var(--ds-ease-in-out);border-radius:999px;outline:none;padding:6px 12px;font-family:inherit}.dy0ESq_castSearch:focus{border-color:var(--tv-focus);box-shadow:0 0 0 2px color-mix(in srgb, var(--tv-focus) 18%, transparent)}.dy0ESq_castOrder{flex-wrap:wrap;align-items:center;gap:6px;display:flex}.dy0ESq_castOrderLabel{font:var(--dsw-font-xxs-12);color:var(--tv-text-tertiary);margin-right:2px}.dy0ESq_castOrderItem{border:1px solid var(--tv-border);background:var(--tv-surface-input);max-width:240px;color:var(--tv-text);cursor:pointer;transition:border-color var(--ds-transition-duration) var(--ds-ease-in-out), background var(--ds-transition-duration) var(--ds-ease-in-out);border-radius:999px;align-items:center;gap:6px;padding:4px 9px 4px 5px;display:inline-flex}.dy0ESq_castOrderItem:hover{border-color:var(--tv-accent-border-strong)}.dy0ESq_castOrderItemMain{border-color:var(--tv-accent-border-strong);background:var(--tv-accent-soft)}.dy0ESq_castOrderAvatar{object-fit:cover;background:var(--tv-accent-soft);width:20px;height:20px;color:var(--tv-accent-text);font:var(--dsw-font-xxxs-11);border-radius:50%;flex-shrink:0;justify-content:center;align-items:center;display:flex;overflow:hidden}.dy0ESq_castOrderName{font:var(--dsw-font-xxs-12);text-overflow:ellipsis;white-space:nowrap;overflow:hidden}.dy0ESq_castOrderRank{font:var(--dsw-font-xxxs-11);color:var(--tv-accent-text);white-space:nowrap;font-weight:700}.dy0ESq_castGrid{grid-template-columns:repeat(auto-fill,minmax(172px,1fr));gap:10px;max-height:420px;padding:2px;display:grid;overflow-y:auto}.dy0ESq_castCard{border:1px solid var(--tv-border);background:var(--tv-surface-card);min-width:0;color:var(--tv-text);text-align:left;cursor:pointer;transition:border-color var(--ds-transition-duration) var(--ds-ease-in-out), background var(--ds-transition-duration) var(--ds-ease-in-out), box-shadow var(--ds-transition-duration) var(--ds-ease-in-out), transform var(--ds-transition-duration) var(--ds-ease-in-out);border-radius:12px;flex-direction:column;gap:8px;padding:10px;display:flex;position:relative}.dy0ESq_castCard:hover{border-color:var(--tv-accent-border-strong);box-shadow:var(--dsw-shadow-lv1);transform:translateY(-2px)}.dy0ESq_castCardSelected{border-color:var(--tv-accent-border-strong);background:linear-gradient(180deg, color-mix(in srgb, var(--tv-accent) 14%, transparent), transparent 90px), var(--tv-surface-card);box-shadow:inset 0 0 0 1px var(--tv-accent-border)}.dy0ESq_castCardMedia{background:var(--tv-accent-soft);border-radius:10px;justify-content:center;align-items:center;width:100%;height:104px;display:flex;overflow:hidden}.dy0ESq_castCardAvatar{object-fit:cover;background:var(--tv-accent-soft);width:100%;height:100%;color:var(--tv-accent-text);border-radius:10px;justify-content:center;align-items:center;font-size:30px;font-weight:700;display:flex}.dy0ESq_castRank{border:1px solid var(--tv-border-strong);background:color-mix(in srgb, var(--tv-bg) 82%, transparent);color:var(--tv-text-secondary);font:var(--dsw-font-xxxs-11);pointer-events:none;border-radius:999px;padding:2px 8px;font-weight:700;position:absolute;top:16px;left:16px}.dy0ESq_castRankMain{border-color:var(--tv-accent-border-strong);background:var(--tv-accent);color:var(--tv-primary-text)}.dy0ESq_castCheck{border:1.5px solid var(--tv-border-strong);background:color-mix(in srgb, var(--tv-bg) 72%, transparent);width:24px;height:24px;color:var(--tv-primary-text);pointer-events:none;transition:border-color var(--ds-transition-duration) var(--ds-ease-in-out), background var(--ds-transition-duration) var(--ds-ease-in-out);border-radius:50%;justify-content:center;align-items:center;font-size:14px;font-weight:700;display:flex;position:absolute;top:16px;right:16px}.dy0ESq_castCardSelected .dy0ESq_castCheck{border-color:var(--tv-accent-border-strong);background:var(--tv-accent)}.dy0ESq_castCardBody{flex-direction:column;gap:4px;min-width:0;display:flex}.dy0ESq_castCardName{font:var(--dsw-font-xs-strong-13);color:var(--tv-text);text-overflow:ellipsis;white-space:nowrap;overflow:hidden}.dy0ESq_castCardDesc{font:var(--dsw-font-xxs-12);color:var(--tv-text-secondary);-webkit-line-clamp:2;-webkit-box-orient:vertical;min-height:2.9em;line-height:1.45;display:-webkit-box;overflow:hidden}.dy0ESq_castCardTags{font:var(--dsw-font-xxxs-11);color:var(--tv-accent-text);text-overflow:ellipsis;white-space:nowrap;overflow:hidden}.dy0ESq_castEmpty{border:1px dashed var(--tv-border-strong);background:color-mix(in srgb, var(--tv-surface-input) 45%, transparent);text-align:center;border-radius:12px;flex-direction:column;justify-content:center;align-items:center;gap:6px;min-height:170px;padding:26px 16px;display:flex}.dy0ESq_castEmptyIcon{font-size:34px;line-height:1}.dy0ESq_castEmptyTitle{font:var(--dsw-font-xs-strong-13);color:var(--tv-text)}.dy0ESq_createFooter{flex-wrap:wrap;align-items:center;gap:12px;display:flex}.dy0ESq_createFooter>:first-child{min-width:140px}.dy0ESq_fieldInput,.dy0ESq_fieldSelect,.dy0ESq_fieldTextarea{box-sizing:border-box;width:100%}@media (width<=720px){.dy0ESq_createHeader{flex-direction:column}.dy0ESq_castPickerHead{flex-direction:column;align-items:flex-start}.dy0ESq_castSearch{width:100%}}.dy0ESq_lorebookPicker{border:1px solid var(--tv-border);background:color-mix(in srgb, var(--tv-surface-input) 55%, transparent);border-radius:12px;flex-direction:column;gap:10px;padding:12px;display:flex}.dy0ESq_lorebookPickerHead{flex-wrap:wrap;justify-content:space-between;align-items:center;gap:10px;display:flex}.dy0ESq_lorebookPickerTitleRow{flex-direction:column;gap:2px;display:flex}.dy0ESq_lorebookPickerTitle{font:var(--dsw-font-s-strong-14);color:var(--tv-accent-text)}.dy0ESq_lorebookPickerHint{font:var(--dsw-font-xxs-12);color:var(--tv-text-tertiary)}.dy0ESq_lorebookPickerActions{flex-wrap:wrap;align-items:center;gap:8px;display:flex}.dy0ESq_lorebookOrder{flex-wrap:wrap;align-items:center;gap:6px;display:flex}.dy0ESq_lorebookOrderLabel{font:var(--dsw-font-xxs-12);color:var(--tv-text-tertiary);margin-right:2px}.dy0ESq_lorebookOrderItem{border:1px solid var(--tv-border);background:var(--tv-surface-input);max-width:260px;color:var(--tv-text);cursor:pointer;transition:border-color var(--ds-transition-duration) var(--ds-ease-in-out), background var(--ds-transition-duration) var(--ds-ease-in-out);border-radius:999px;align-items:center;gap:6px;padding:4px 8px 4px 6px;display:inline-flex}.dy0ESq_lorebookOrderItem:hover{border-color:var(--tv-accent-border-strong)}.dy0ESq_lorebookOrderRank{background:var(--tv-accent-soft);min-width:18px;height:18px;color:var(--tv-accent-text);font:var(--dsw-font-xxxs-11);box-sizing:border-box;border-radius:999px;justify-content:center;align-items:center;padding:0 4px;font-weight:700;display:inline-flex}.dy0ESq_lorebookOrderName{font:var(--dsw-font-xxs-12);text-overflow:ellipsis;white-space:nowrap;overflow:hidden}.dy0ESq_lorebookOrderRemove{color:var(--tv-text-tertiary);font-size:14px;line-height:1}.dy0ESq_lorebookGrid{grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:10px;max-height:280px;padding:2px;display:grid;overflow-y:auto}.dy0ESq_lorebookCard{border:1px solid var(--tv-border);background:var(--tv-surface-card);min-width:0;color:var(--tv-text);text-align:left;cursor:pointer;transition:border-color var(--ds-transition-duration) var(--ds-ease-in-out), background var(--ds-transition-duration) var(--ds-ease-in-out), box-shadow var(--ds-transition-duration) var(--ds-ease-in-out), transform var(--ds-transition-duration) var(--ds-ease-in-out);border-radius:10px;align-items:center;gap:8px;padding:10px 12px;display:flex;position:relative}.dy0ESq_lorebookCard:hover{border-color:var(--tv-accent-border-strong);box-shadow:var(--dsw-shadow-lv1);transform:translateY(-1px)}.dy0ESq_lorebookCardSelected{border-color:var(--tv-accent-border-strong);background:linear-gradient(90deg, color-mix(in srgb, var(--tv-accent) 13%, transparent), transparent 160px), var(--tv-surface-card);box-shadow:inset 0 0 0 1px var(--tv-accent-border)}.dy0ESq_lorebookCardCheck{border:1.5px solid var(--tv-border-strong);width:20px;height:20px;color:var(--tv-primary-text);box-sizing:border-box;transition:border-color var(--ds-transition-duration) var(--ds-ease-in-out), background var(--ds-transition-duration) var(--ds-ease-in-out);border-radius:50%;flex-shrink:0;justify-content:center;align-items:center;font-size:13px;font-weight:700;display:flex}.dy0ESq_lorebookCardSelected .dy0ESq_lorebookCardCheck{border-color:var(--tv-accent-border-strong);background:var(--tv-accent)}.dy0ESq_lorebookCardBody{flex-direction:column;flex:1;gap:2px;min-width:0;display:flex}.dy0ESq_lorebookCardName{font:var(--dsw-font-xs-strong-13);color:var(--tv-text);text-overflow:ellipsis;white-space:nowrap;overflow:hidden}.dy0ESq_lorebookCardMeta{font:var(--dsw-font-xxxs-11);color:var(--tv-text-tertiary);text-overflow:ellipsis;white-space:nowrap;overflow:hidden}.dy0ESq_lorebookRank{background:var(--tv-accent-soft);color:var(--tv-accent-text);border:1px solid var(--tv-accent-border);font:var(--dsw-font-xxxs-11);border-radius:999px;flex-shrink:0;padding:2px 7px;font-weight:700}@media (width<=720px){.dy0ESq_lorebookPickerHead{flex-direction:column;align-items:flex-start}}.dy0ESq_thinking{border:1px dashed var(--tv-border);background:var(--tv-surface-card);border-radius:10px;overflow:hidden}.dy0ESq_thinkingToggle{width:100%;color:var(--tv-text-tertiary);font:var(--dsw-font-xxs-12);cursor:pointer;text-align:left;background:0 0;border:none;align-items:center;gap:6px;padding:5px 10px;display:flex}.dy0ESq_thinkingToggle:hover{color:var(--tv-text-secondary)}.dy0ESq_thinkingOpen{border-style:solid}.dy0ESq_thinkingOpen>.dy0ESq_thinkingToggle{color:var(--tv-text-secondary)}.dy0ESq_thinkingCaret{color:var(--tv-accent-text)}.dy0ESq_thinkingBody{color:var(--tv-text-secondary);font:var(--dsw-font-xs-13);white-space:pre-wrap;word-break:break-word;max-height:260px;padding:2px 10px 8px;overflow-y:auto}.dy0ESq_msgStatus{font:var(--dsw-font-xxs-12);color:var(--tv-text-tertiary);white-space:nowrap;text-overflow:ellipsis;overflow:hidden}.dy0ESq_msgStatusWarn{color:var(--dsw-alias-warning-text,#b45309)}.dy0ESq_msgStatusError{color:var(--dsw-alias-danger-text,#c43d3d);max-width:100%}.dy0ESq_msgStatusStreaming{font:var(--dsw-font-xxs-12);color:var(--tv-accent-text);align-items:center;gap:6px;display:inline-flex}.dy0ESq_msgActions{flex-wrap:wrap;align-items:center;gap:6px;display:flex}.dy0ESq_msgUser .dy0ESq_msgActions{justify-content:flex-end}.dy0ESq_msgActionBtn{border:1px solid var(--tv-border);color:var(--tv-text-tertiary);font:var(--dsw-font-xxs-12);cursor:pointer;transition:color var(--ds-transition-duration) var(--ds-ease-in-out), border-color var(--ds-transition-duration) var(--ds-ease-in-out);background:0 0;border-radius:999px;padding:2px 10px}.dy0ESq_msgActionBtn:hover:not(:disabled){color:var(--tv-accent-text);border-color:var(--tv-accent-border)}.dy0ESq_msgActionBtn:disabled{opacity:.45;cursor:default}.dy0ESq_swipeNav{border:1px solid var(--tv-border);border-radius:999px;align-items:center;gap:2px;padding:0 4px;display:inline-flex}.dy0ESq_swipeBtn{color:var(--tv-text-secondary);font:var(--dsw-font-s-14);cursor:pointer;background:0 0;border:none;border-radius:999px;width:22px;height:22px;line-height:1}.dy0ESq_swipeBtn:hover:not(:disabled){color:var(--tv-accent-text);background:var(--tv-accent-soft)}.dy0ESq_swipeBtn:disabled{opacity:.4;cursor:default}.dy0ESq_swipeCount{font:var(--dsw-font-xxxs-11);color:var(--tv-text-tertiary);text-align:center;user-select:none;min-width:34px}.dy0ESq_editArea{flex-direction:column;gap:6px;min-width:min(420px,100%);display:flex}.dy0ESq_editInput{resize:vertical;background:var(--tv-surface-input);border:1px solid var(--tv-border);color:var(--tv-text);font:var(--dsw-font-s-14);border-radius:10px;outline:none;padding:9px 12px;font-family:inherit}.dy0ESq_editInput:focus{border-color:var(--tv-focus)}.dy0ESq_stopBtn{border:1px solid var(--dsw-alias-danger-text,#c43d3d);color:var(--dsw-alias-danger-text,#c43d3d);background:0 0}.dy0ESq_stopBtn:hover:not(:disabled){background:color-mix(in srgb, var(--dsw-alias-danger-text,#c43d3d) 12%, transparent)}.tv-scene-rail{width:92px;flex-shrink:0;display:flex;flex-direction:column;align-items:center;gap:12px;padding:14px 6px;border-right:1px solid var(--tv-border);background:var(--tv-sidebar-fill);overflow-y:auto}.tv-scene-title{font-weight:600;font-size:12px;color:var(--tv-text)}.tv-scene-hint{font-size:10px;color:var(--tv-text-tertiary)}.tv-scene-character{display:flex;flex-direction:column;align-items:center;gap:5px;width:100%;padding:8px 2px;border:1px solid transparent;border-radius:12px;background:transparent;color:var(--tv-text-secondary);cursor:pointer}.tv-scene-character:hover:not(:disabled){background:var(--tv-hover)}.tv-scene-character:focus-visible{outline:2px solid var(--tv-focus)}.tv-scene-character:disabled{opacity:.5;cursor:default}.tv-scene-present{border-color:var(--tv-accent-border);background:var(--tv-accent-soft);color:var(--tv-accent-text)}.tv-character-avatar{display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;flex-shrink:0;overflow:hidden;border-radius:50%;background:var(--tv-accent-soft);border:1px solid var(--tv-border);color:var(--tv-accent-text);font-size:16px}.tv-character-avatar img{width:100%;height:100%;object-fit:cover}.tv-scene-character .tv-character-avatar{width:52px;height:52px;font-size:22px}.tv-scene-name{font-size:12px;max-width:100%;overflow-wrap:anywhere}.tv-scene-status{font-size:10px}.dy0ESq_msgName{display:inline-flex;align-items:center;gap:8px}@media(max-width:760px){.tv-scene-rail{width:66px;padding:10px 3px}.tv-scene-character .tv-character-avatar{width:40px;height:40px}.tv-scene-name{font-size:11px}.tv-scene-hint{font-size:9px}}.tv-scene-character.tv-scene-present:not(.tv-scene-current){border-color:var(--tv-border);background:transparent;color:var(--tv-text-secondary)}.tv-scene-current{box-shadow:inset 0 0 0 1px var(--tv-accent-border);background:var(--tv-accent-soft);color:var(--tv-accent-text)}.tv-settings-sheet{overflow:visible}.tv-settings-actions{position:sticky;top:0;z-index:10;background:var(--tv-surface-card);border-bottom:1px solid var(--tv-border);flex-wrap:wrap;box-shadow:0 4px 10px #0002}.tv-settings-actions>.dy0ESq_btn{min-width:0;min-height:32px;padding:6px 12px;flex:0 0 auto}.tv-settings-actions>.dy0ESq_btnGhost{background:transparent;border-color:transparent;color:var(--tv-text-secondary)}.tv-settings-actions>.dy0ESq_btnGhost:hover:not(:disabled){background:var(--tv-hover);color:var(--tv-text)}.tv-settings-management{display:flex;align-items:center;justify-content:space-between;gap:16px;border-top:1px solid var(--tv-border);margin-top:8px;padding-top:16px}";
+		const css = ".dy0ESq_view{--tv-bg:var(--dsw-alias-bg-base);--tv-nav-bg:var(--dsw-alias-bg-module-platform);--tv-surface-card:var(--dsw-alias-bg-layer-2);--tv-surface-input:var(--dsw-specific-input-major);--tv-sidebar-fill:var(--dsw-specific-sidebar-fill);--tv-bubble-user:var(--dsw-specific-bubble);--tv-border:var(--dsw-alias-border-l2);--tv-border-strong:var(--dsw-alias-border-l3);--tv-text:var(--dsw-alias-label-primary);--tv-text-secondary:var(--dsw-alias-label-secondary);--tv-text-tertiary:var(--dsw-alias-label-tertiary);--tv-text-caption:var(--dsw-alias-label-caption);--tv-hover:var(--dsw-alias-interactive-bg-hover);--tv-active:var(--dsw-alias-interactive-bg-active);--tv-btn-bg:var(--dsw-alias-button-elevated-fill);--tv-btn-bg-hover:var(--dsw-alias-interactive-bg-hover-solid);--tv-primary-fill:var(--dsw-alias-button-primary-fill);--tv-primary-fill-hover:var(--dsw-alias-button-primary-hover);--tv-primary-text:var(--dsw-alias-label-primary-foreground);--tv-danger-fill:color-mix(in srgb, var(--dsw-alias-state-error-primary) 8%, transparent);--tv-danger-fill-hover:color-mix(in srgb, var(--dsw-alias-state-error-primary) 18%, transparent);--tv-danger-border:color-mix(in srgb, var(--dsw-alias-state-error-primary) 40%, transparent);--tv-error:var(--dsw-alias-state-error-primary);--tv-focus:var(--dsw-alias-state-business-primary);--tv-user-name:var(--dsw-alias-state-business-primary);--tv-accent:var(--dsw-static-amber-500);--tv-accent-text:var(--dsw-static-amber-600);--tv-accent-soft:color-mix(in srgb, var(--tv-accent) 12%, transparent);--tv-accent-border:color-mix(in srgb, var(--tv-accent) 32%, transparent);--tv-accent-border-strong:color-mix(in srgb, var(--tv-accent) 55%, transparent);background:radial-gradient(1200px 600px at 80% -10%, var(--tv-accent-soft), transparent 60%), var(--tv-bg);height:100%;min-height:0;color:var(--tv-text);font:var(--dsw-font-s-14);flex-direction:column;display:flex}[data-conversation-scroll] .dy0ESq_view{height:100%;overflow:hidden}.dy0ESq_nav{border-bottom:1px solid var(--tv-border);background:var(--tv-nav-bg);flex-shrink:0;align-items:center;gap:4px;padding:8px 12px;display:flex}.dy0ESq_navTitle{font:var(--dsw-font-m-18);letter-spacing:2px;color:var(--tv-accent-text);white-space:nowrap;margin-right:12px;font-weight:700}.dy0ESq_navTab{color:var(--tv-text-secondary);cursor:pointer;font:var(--dsw-font-xs-13);transition:background var(--ds-transition-duration) var(--ds-ease-in-out), color var(--ds-transition-duration) var(--ds-ease-in-out);background:0 0;border:none;border-radius:6px;padding:6px 14px}.dy0ESq_navTab:hover{background:var(--tv-hover);color:var(--tv-text)}.dy0ESq_navTabActive{background:var(--tv-accent-soft);color:var(--tv-accent-text);font-weight:600}.dy0ESq_navSpacer{flex:1}.dy0ESq_navError{color:var(--tv-error);font:var(--dsw-font-xxs-12);text-overflow:ellipsis;white-space:nowrap;max-width:40%;overflow:hidden}.dy0ESq_stylePicker{font:var(--dsw-font-xxs-12);color:var(--tv-text-tertiary);white-space:nowrap;align-items:center;gap:6px;margin-right:8px;display:inline-flex}.dy0ESq_styleSelect{background:var(--tv-surface-input);border:1px solid var(--tv-border);color:var(--tv-text-secondary);font:var(--dsw-font-xxs-12);cursor:pointer;transition:border-color var(--ds-transition-duration) var(--ds-ease-in-out), box-shadow var(--ds-transition-duration) var(--ds-ease-in-out);border-radius:6px;outline:none;padding:3px 8px;font-family:inherit}.dy0ESq_styleSelect:focus{border-color:var(--tv-focus);box-shadow:0 0 0 2px color-mix(in srgb, var(--tv-focus) 18%, transparent)}.dy0ESq_body{flex:1;min-height:0;display:flex}.dy0ESq_sidebar{border-right:1px solid var(--tv-border);background:var(--tv-sidebar-fill);flex-direction:column;flex-shrink:0;width:260px;min-height:0;display:flex}.dy0ESq_sidebarHead{border-bottom:1px solid var(--tv-border);flex-shrink:0;align-items:center;gap:8px;padding:10px 12px;display:flex}.dy0ESq_sidebarTitle{font:var(--dsw-font-xs-strong-13);color:var(--tv-accent-text);flex:1}.dy0ESq_list{flex-direction:column;flex:1;gap:4px;min-height:0;padding:6px;display:flex;overflow-y:auto}.dy0ESq_listItem{cursor:pointer;color:var(--tv-text);text-align:left;font:var(--dsw-font-xs-13);width:100%;transition:background var(--ds-transition-duration) var(--ds-ease-in-out);background:0 0;border:none;border-radius:6px;align-items:center;gap:8px;padding:7px 9px;display:flex}.dy0ESq_listItem:hover{background:var(--tv-hover)}.dy0ESq_listItemActive{background:var(--tv-accent-soft)}.dy0ESq_listItemAvatar{object-fit:cover;background:var(--tv-accent-soft);border-radius:50%;flex-shrink:0;width:30px;height:30px}.dy0ESq_listItemName{text-overflow:ellipsis;white-space:nowrap;flex:1;overflow:hidden}.dy0ESq_listItemMeta{font:var(--dsw-font-xxxs-11);color:var(--tv-text-caption)}.dy0ESq_empty{text-align:center;color:var(--tv-text-tertiary);font:var(--dsw-font-xs-13);padding:24px 12px}.dy0ESq_content{flex-direction:column;flex:1;gap:12px;min-width:0;min-height:0;padding:14px;display:flex;overflow-y:auto}.dy0ESq_grid{grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:10px;display:grid}.dy0ESq_card{border:1px solid var(--tv-border);background:var(--tv-surface-card);cursor:pointer;transition:border-color var(--ds-transition-duration) var(--ds-ease-in-out), transform var(--ds-transition-duration) var(--ds-ease-in-out), box-shadow var(--ds-transition-duration) var(--ds-ease-in-out);text-align:center;border-radius:8px;flex-direction:column;align-items:center;gap:6px;padding:10px;display:flex}.dy0ESq_card:hover{border-color:var(--tv-accent-border-strong);box-shadow:var(--dsw-shadow-lv1);transform:translateY(-1px)}.dy0ESq_cardAvatar{object-fit:cover;background:var(--tv-accent-soft);border-radius:50%;width:64px;height:64px}.dy0ESq_cardName{font:var(--dsw-font-xs-strong-13)}.dy0ESq_cardTags{font:var(--dsw-font-xxxs-11);color:var(--tv-text-tertiary);text-overflow:ellipsis;white-space:nowrap;max-width:100%;overflow:hidden}.dy0ESq_chat{flex-direction:column;flex:1;height:100%;min-height:0;display:flex}.dy0ESq_chatHead{border-bottom:1px solid var(--tv-border);flex-shrink:0;align-items:center;gap:10px;padding:8px 12px;display:flex}.dy0ESq_chatTitle{font:var(--dsw-font-m-18);font-weight:700}.dy0ESq_chatMeta{font:var(--dsw-font-xxs-12);color:var(--tv-text-caption)}.dy0ESq_messages{flex-direction:column;flex:1;gap:12px;min-height:0;padding:14px 16px;display:flex;overflow-y:auto}.dy0ESq_msg{flex-direction:column;gap:3px;max-width:85%;display:flex}.dy0ESq_msgUser{align-self:flex-end;align-items:flex-end}.dy0ESq_msgName{font:var(--dsw-font-xxs-strong-12);color:var(--tv-accent-text)}.dy0ESq_msgUser .dy0ESq_msgName{color:var(--tv-user-name)}.dy0ESq_msgBubble{background:var(--tv-surface-card);border:1px solid var(--tv-border);white-space:pre-wrap;word-break:break-word;font:var(--dsw-font-base-16);border-radius:22px;padding:10px 16px}.dy0ESq_msgRich{line-height:1.65}.dy0ESq_msgRich p{margin:0 0 .6em}.dy0ESq_msgRich p:last-child{margin-bottom:0}.dy0ESq_msgRich img{border-radius:8px;max-width:100%;height:auto;margin:4px 0;display:block}.dy0ESq_msgRich a{color:var(--tv-accent-text);text-decoration:underline}.dy0ESq_msgRich pre{background:var(--tv-surface-input);border:1px solid var(--tv-border);white-space:pre-wrap;border-radius:8px;padding:8px 10px;overflow-x:auto}.dy0ESq_msgRich code{font-family:var(--dsw-font-family-monospace,monospace);font-size:.92em}.dy0ESq_msgRich blockquote{border-left:3px solid var(--tv-accent-border-strong);color:var(--tv-text-secondary);margin:4px 0;padding:2px 10px}.dy0ESq_msgRich ul,.dy0ESq_msgRich ol{margin:4px 0;padding-left:22px}.dy0ESq_msgRich table{border-collapse:collapse;font:var(--dsw-font-xs-13);margin:6px 0}.dy0ESq_msgRich th,.dy0ESq_msgRich td{border:1px solid var(--tv-border);padding:4px 8px}.dy0ESq_msgRich hr{border:none;border-top:1px solid var(--tv-border);margin:10px 0}.dy0ESq_msgUser .dy0ESq_msgBubble{background:var(--tv-bubble-user);border:none}.dy0ESq_msgNarrator .dy0ESq_msgBubble{font:var(--dsw-font-s-14);color:var(--tv-text-secondary);background:0 0;border:none;padding:2px 4px;font-style:italic}.dy0ESq_msgNarrator .dy0ESq_msgName{color:var(--tv-text-tertiary)}.dy0ESq_msgSystem .dy0ESq_msgBubble{color:var(--tv-text-caption);font:var(--dsw-font-xxs-12);background:0 0;border:none;padding:2px 4px}.dy0ESq_msgTime{font:var(--dsw-font-xxxs-11);color:var(--tv-text-caption)}.dy0ESq_composer{border-top:1px solid var(--tv-border);background:var(--tv-nav-bg);flex-direction:column;flex-shrink:0;gap:8px;padding:10px 12px;display:flex}.dy0ESq_composerRow{align-items:center;gap:8px;display:flex}.dy0ESq_composerInput{resize:none;background:var(--tv-surface-input);border:1px solid var(--dsw-alias-border-l2-darkmode-thin);min-height:40px;max-height:120px;color:var(--tv-text);font:var(--dsw-font-s-14);transition:border-color var(--ds-transition-duration) var(--ds-ease-in-out), box-shadow var(--ds-transition-duration) var(--ds-ease-in-out);border-radius:10px;outline:none;flex:1;padding:9px 12px;font-family:inherit}.dy0ESq_composerInput:focus{border-color:var(--tv-focus);box-shadow:0 0 0 2px color-mix(in srgb, var(--tv-focus) 18%, transparent)}.dy0ESq_composerInput:disabled{opacity:.5}.dy0ESq_sendBtn{background:var(--tv-primary-fill);color:var(--tv-primary-text);cursor:pointer;height:40px;font-weight:600;font:var(--dsw-font-s-strong-14);transition:background var(--ds-transition-duration) var(--ds-ease-in-out);border:none;border-radius:10px;flex-shrink:0;padding:0 18px}.dy0ESq_sendBtn:hover:not(:disabled){background:var(--tv-primary-fill-hover)}.dy0ESq_sendBtn:disabled{opacity:.45;cursor:default}.dy0ESq_modeRow{font:var(--dsw-font-xxs-12);color:var(--tv-text-tertiary);align-items:center;gap:10px;display:flex}.dy0ESq_modeLabel{cursor:pointer;align-items:center;gap:4px;display:flex}.dy0ESq_btn{border:1px solid var(--tv-border);background:var(--tv-btn-bg);color:var(--tv-text-secondary);cursor:pointer;font:var(--dsw-font-xs-13);transition:background var(--ds-transition-duration) var(--ds-ease-in-out), color var(--ds-transition-duration) var(--ds-ease-in-out);white-space:nowrap;border-radius:6px;padding:5px 11px}.dy0ESq_btn:hover:not(:disabled){background:var(--tv-btn-bg-hover);color:var(--tv-text)}.dy0ESq_btn:disabled{opacity:.4;cursor:default}.dy0ESq_btnDanger{border-color:var(--tv-danger-border);background:var(--tv-danger-fill);color:var(--tv-error)}.dy0ESq_btnDanger:hover:not(:disabled){background:var(--tv-danger-fill-hover)}.dy0ESq_btnPrimary{background:var(--tv-primary-fill);color:var(--tv-primary-text);border-color:#0000;font-weight:600}.dy0ESq_btnPrimary:hover:not(:disabled){background:var(--tv-primary-fill-hover);color:var(--tv-primary-text)}.dy0ESq_btnGhost{color:var(--tv-text-tertiary);background:0 0;border-color:#0000;padding:4px 8px}.dy0ESq_btnGhost:hover:not(:disabled){background:var(--tv-hover);color:var(--tv-text-secondary)}.dy0ESq_field{flex-direction:column;gap:4px;display:flex}.dy0ESq_fieldLabel{font:var(--dsw-font-xxs-12);color:var(--tv-text-secondary)}.dy0ESq_fieldInput,.dy0ESq_fieldSelect,.dy0ESq_fieldTextarea{background:var(--tv-surface-input);border:1px solid var(--tv-border);color:var(--tv-text);font:var(--dsw-font-xs-13);transition:border-color var(--ds-transition-duration) var(--ds-ease-in-out), box-shadow var(--ds-transition-duration) var(--ds-ease-in-out);border-radius:6px;outline:none;padding:7px 10px;font-family:inherit}.dy0ESq_fieldInput:focus,.dy0ESq_fieldSelect:focus,.dy0ESq_fieldTextarea:focus{border-color:var(--tv-focus);box-shadow:0 0 0 2px color-mix(in srgb, var(--tv-focus) 18%, transparent)}.dy0ESq_fieldTextarea{resize:vertical;min-height:80px;line-height:1.5}.dy0ESq_row{flex-wrap:wrap;align-items:center;gap:8px;display:flex}.dy0ESq_spread{justify-content:space-between}.dy0ESq_hint{font:var(--dsw-font-xxs-12);color:var(--tv-text-tertiary);line-height:1.5}.dy0ESq_section{flex-direction:column;gap:10px;display:flex}.dy0ESq_sectionTitle{font:var(--dsw-font-xs-strong-13);color:var(--tv-accent-text);border-bottom:1px solid var(--tv-border);padding-bottom:6px}.dy0ESq_editor{flex-direction:column;gap:10px;max-width:720px;display:flex}.dy0ESq_badge{font:var(--dsw-font-xxxs-11);background:var(--tv-accent-soft);color:var(--tv-accent-text);border:1px solid var(--tv-accent-border);border-radius:10px;padding:1px 7px;display:inline-block}.dy0ESq_checkRow{font:var(--dsw-font-xs-13);cursor:pointer;align-items:center;gap:6px;display:flex}.dy0ESq_spinner{border:2px solid var(--tv-accent-border);border-top-color:var(--tv-accent);border-radius:50%;width:14px;height:14px;animation:.8s linear infinite dy0ESq_spin;display:inline-block}@keyframes dy0ESq_spin{to{transform:rotate(360deg)}}.dy0ESq_entryList{flex-direction:column;gap:6px;display:flex}.dy0ESq_entry{border:1px solid var(--tv-border);background:var(--tv-surface-card);border-radius:6px;flex-direction:column;gap:4px;padding:8px 10px;display:flex}.dy0ESq_entryKeys{font:var(--dsw-font-xxs-12);color:var(--tv-accent-text)}.dy0ESq_entryContent{font:var(--dsw-font-s-14);color:var(--tv-text-secondary);white-space:pre-wrap;max-height:120px;overflow-y:auto}.dy0ESq_entryHead{justify-content:space-between;align-items:center;gap:8px;display:flex}.dy0ESq_view :where(button,select):focus-visible{outline:1.5px solid var(--tv-focus);outline-offset:2px}.dy0ESq_view[data-style=classic]{color-scheme:dark;--tv-bg:#141210;--tv-nav-bg:#141210e6;--tv-surface-card:#00000047;--tv-surface-input:#00000059;--tv-sidebar-fill:#00000038;--tv-bubble-user:#8fb7d91f;--tv-border:#d4af3740;--tv-border-strong:#d4af3759;--tv-text:#e8e2d4;--tv-text-secondary:#c9bfa3;--tv-text-tertiary:#8d846c;--tv-text-caption:#8d846c;--tv-hover:#d4af371a;--tv-active:#d4af3733;--tv-btn-bg:#d4af371a;--tv-btn-bg-hover:#d4af3738;--tv-primary-fill:#b8962e;--tv-primary-fill-hover:#d4af37;--tv-primary-text:#201a08;--tv-danger-fill:#e06c5e14;--tv-danger-fill-hover:#e06c5e2e;--tv-danger-border:#e06c5e66;--tv-error:#e06c5e;--tv-focus:#d4af37;--tv-user-name:#8fb7d9;--tv-accent:#d4af37;--tv-accent-text:#d4af37;--tv-accent-soft:#d4af3726;--tv-accent-border:#d4af374d;--tv-accent-border-strong:#d4af37}.dy0ESq_playAvatarStack{flex-shrink:0;align-items:center;display:flex}.dy0ESq_playAvatarStack>*+*{margin-left:-8px}.dy0ESq_playAvatar{object-fit:cover;background:var(--tv-accent-soft);width:26px;height:26px;color:var(--tv-accent-text);border:2px solid var(--tv-sidebar-fill);font:var(--dsw-font-xxxs-11);border-radius:50%;justify-content:center;align-items:center;display:flex;overflow:hidden}.dy0ESq_playAvatarMore{background:var(--tv-surface-card);min-width:26px;height:26px;color:var(--tv-text-secondary);border:1px solid var(--tv-border);font:var(--dsw-font-xxxs-11);box-sizing:border-box;border-radius:999px;justify-content:center;align-items:center;padding:0 5px;display:inline-flex}.dy0ESq_listItemBody{flex-direction:column;flex:1;gap:2px;min-width:0;display:flex}.dy0ESq_playTitle{font:var(--dsw-font-xs-strong-13);color:var(--tv-text);text-overflow:ellipsis;white-space:nowrap;max-width:100%;overflow:hidden}.dy0ESq_playMeta{font:var(--dsw-font-xxxs-11);color:var(--tv-text-secondary);text-overflow:ellipsis;white-space:nowrap;max-width:100%;overflow:hidden}.dy0ESq_createSheet{border:1px solid var(--tv-border);background:color-mix(in srgb, var(--tv-surface-card) 78%, transparent);width:100%;max-width:1080px;box-shadow:var(--dsw-shadow-lv1);border-radius:14px;flex-direction:column;gap:16px;margin:0 auto;padding:18px;display:flex}.dy0ESq_createHeader{justify-content:space-between;align-items:flex-start;gap:12px;display:flex}.dy0ESq_createHeaderText{flex-direction:column;gap:4px;min-width:0;display:flex}.dy0ESq_createTitle{font:var(--dsw-font-m-18);color:var(--tv-text);font-weight:700}.dy0ESq_createSubtitle{font:var(--dsw-font-xs-13);color:var(--tv-text-secondary);max-width:760px;line-height:1.6}.dy0ESq_castCount{border:1px solid var(--tv-accent-border);background:var(--tv-accent-soft);color:var(--tv-accent-text);font:var(--dsw-font-xxs-strong-12);white-space:nowrap;border-radius:999px;flex-shrink:0;padding:5px 10px}.dy0ESq_castCountEmpty{border-color:var(--tv-border);background:var(--tv-surface-input);color:var(--tv-text-tertiary)}.dy0ESq_createBasics{grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;display:grid}.dy0ESq_createModes{grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:10px;display:grid}.dy0ESq_modeCard{text-align:left;border:1px solid var(--tv-border);background:var(--tv-surface-input);color:var(--tv-text);cursor:pointer;transition:border-color var(--ds-transition-duration) var(--ds-ease-in-out), background var(--ds-transition-duration) var(--ds-ease-in-out), box-shadow var(--ds-transition-duration) var(--ds-ease-in-out);border-radius:10px;flex-direction:column;align-items:flex-start;gap:4px;padding:10px 12px;display:flex}.dy0ESq_modeCard:hover:not(:disabled){border-color:var(--tv-accent-border-strong)}.dy0ESq_modeCard:disabled{opacity:.5;cursor:default}.dy0ESq_modeCardOn{border-color:var(--tv-accent-border-strong);background:var(--tv-accent-soft);box-shadow:inset 0 0 0 1px var(--tv-accent-border)}.dy0ESq_modeCardTitle{font:var(--dsw-font-xs-strong-13);color:var(--tv-text)}.dy0ESq_modeCardOn .dy0ESq_modeCardTitle{color:var(--tv-accent-text)}.dy0ESq_modeCardText{font:var(--dsw-font-xxs-12);color:var(--tv-text-tertiary);line-height:1.45}.dy0ESq_castPicker{border:1px solid var(--tv-border);background:color-mix(in srgb, var(--tv-surface-input) 55%, transparent);border-radius:12px;flex-direction:column;gap:10px;padding:12px;display:flex}.dy0ESq_castPickerHead{flex-wrap:wrap;justify-content:space-between;align-items:center;gap:10px;display:flex}.dy0ESq_castPickerTitleRow{flex-direction:column;gap:2px;display:flex}.dy0ESq_castPickerTitle{font:var(--dsw-font-s-strong-14);color:var(--tv-accent-text)}.dy0ESq_castPickerHint{font:var(--dsw-font-xxs-12);color:var(--tv-text-tertiary)}.dy0ESq_castPickerActions{align-items:center;gap:8px;display:flex}.dy0ESq_castSearch{background:var(--tv-surface-input);border:1px solid var(--tv-border);width:min(280px,100%);color:var(--tv-text);font:var(--dsw-font-xxs-12);transition:border-color var(--ds-transition-duration) var(--ds-ease-in-out), box-shadow var(--ds-transition-duration) var(--ds-ease-in-out);border-radius:999px;outline:none;padding:6px 12px;font-family:inherit}.dy0ESq_castSearch:focus{border-color:var(--tv-focus);box-shadow:0 0 0 2px color-mix(in srgb, var(--tv-focus) 18%, transparent)}.dy0ESq_castOrder{flex-wrap:wrap;align-items:center;gap:6px;display:flex}.dy0ESq_castOrderLabel{font:var(--dsw-font-xxs-12);color:var(--tv-text-tertiary);margin-right:2px}.dy0ESq_castOrderItem{border:1px solid var(--tv-border);background:var(--tv-surface-input);max-width:240px;color:var(--tv-text);cursor:pointer;transition:border-color var(--ds-transition-duration) var(--ds-ease-in-out), background var(--ds-transition-duration) var(--ds-ease-in-out);border-radius:999px;align-items:center;gap:6px;padding:4px 9px 4px 5px;display:inline-flex}.dy0ESq_castOrderItem:hover{border-color:var(--tv-accent-border-strong)}.dy0ESq_castOrderItemMain{border-color:var(--tv-accent-border-strong);background:var(--tv-accent-soft)}.dy0ESq_castOrderAvatar{object-fit:cover;background:var(--tv-accent-soft);width:20px;height:20px;color:var(--tv-accent-text);font:var(--dsw-font-xxxs-11);border-radius:50%;flex-shrink:0;justify-content:center;align-items:center;display:flex;overflow:hidden}.dy0ESq_castOrderName{font:var(--dsw-font-xxs-12);text-overflow:ellipsis;white-space:nowrap;overflow:hidden}.dy0ESq_castOrderRank{font:var(--dsw-font-xxxs-11);color:var(--tv-accent-text);white-space:nowrap;font-weight:700}.dy0ESq_castGrid{grid-template-columns:repeat(auto-fill,minmax(172px,1fr));gap:10px;max-height:420px;padding:2px;display:grid;overflow-y:auto}.dy0ESq_castCard{border:1px solid var(--tv-border);background:var(--tv-surface-card);min-width:0;color:var(--tv-text);text-align:left;cursor:pointer;transition:border-color var(--ds-transition-duration) var(--ds-ease-in-out), background var(--ds-transition-duration) var(--ds-ease-in-out), box-shadow var(--ds-transition-duration) var(--ds-ease-in-out), transform var(--ds-transition-duration) var(--ds-ease-in-out);border-radius:12px;flex-direction:column;gap:8px;padding:10px;display:flex;position:relative}.dy0ESq_castCard:hover{border-color:var(--tv-accent-border-strong);box-shadow:var(--dsw-shadow-lv1);transform:translateY(-2px)}.dy0ESq_castCardSelected{border-color:var(--tv-accent-border-strong);background:linear-gradient(180deg, color-mix(in srgb, var(--tv-accent) 14%, transparent), transparent 90px), var(--tv-surface-card);box-shadow:inset 0 0 0 1px var(--tv-accent-border)}.dy0ESq_castCardMedia{background:var(--tv-accent-soft);border-radius:10px;justify-content:center;align-items:center;width:100%;height:104px;display:flex;overflow:hidden}.dy0ESq_castCardAvatar{object-fit:cover;background:var(--tv-accent-soft);width:100%;height:100%;color:var(--tv-accent-text);border-radius:10px;justify-content:center;align-items:center;font-size:30px;font-weight:700;display:flex}.dy0ESq_castRank{border:1px solid var(--tv-border-strong);background:color-mix(in srgb, var(--tv-bg) 82%, transparent);color:var(--tv-text-secondary);font:var(--dsw-font-xxxs-11);pointer-events:none;border-radius:999px;padding:2px 8px;font-weight:700;position:absolute;top:16px;left:16px}.dy0ESq_castRankMain{border-color:var(--tv-accent-border-strong);background:var(--tv-accent);color:var(--tv-primary-text)}.dy0ESq_castCheck{border:1.5px solid var(--tv-border-strong);background:color-mix(in srgb, var(--tv-bg) 72%, transparent);width:24px;height:24px;color:var(--tv-primary-text);pointer-events:none;transition:border-color var(--ds-transition-duration) var(--ds-ease-in-out), background var(--ds-transition-duration) var(--ds-ease-in-out);border-radius:50%;justify-content:center;align-items:center;font-size:14px;font-weight:700;display:flex;position:absolute;top:16px;right:16px}.dy0ESq_castCardSelected .dy0ESq_castCheck{border-color:var(--tv-accent-border-strong);background:var(--tv-accent)}.dy0ESq_castCardBody{flex-direction:column;gap:4px;min-width:0;display:flex}.dy0ESq_castCardName{font:var(--dsw-font-xs-strong-13);color:var(--tv-text);text-overflow:ellipsis;white-space:nowrap;overflow:hidden}.dy0ESq_castCardDesc{font:var(--dsw-font-xxs-12);color:var(--tv-text-secondary);-webkit-line-clamp:2;-webkit-box-orient:vertical;min-height:2.9em;line-height:1.45;display:-webkit-box;overflow:hidden}.dy0ESq_castCardTags{font:var(--dsw-font-xxxs-11);color:var(--tv-accent-text);text-overflow:ellipsis;white-space:nowrap;overflow:hidden}.dy0ESq_castEmpty{border:1px dashed var(--tv-border-strong);background:color-mix(in srgb, var(--tv-surface-input) 45%, transparent);text-align:center;border-radius:12px;flex-direction:column;justify-content:center;align-items:center;gap:6px;min-height:170px;padding:26px 16px;display:flex}.dy0ESq_castEmptyIcon{font-size:34px;line-height:1}.dy0ESq_castEmptyTitle{font:var(--dsw-font-xs-strong-13);color:var(--tv-text)}.dy0ESq_createFooter{flex-wrap:wrap;align-items:center;gap:12px;display:flex}.dy0ESq_createFooter>:first-child{min-width:140px}.dy0ESq_fieldInput,.dy0ESq_fieldSelect,.dy0ESq_fieldTextarea{box-sizing:border-box;width:100%}@media (width<=720px){.dy0ESq_createHeader{flex-direction:column}.dy0ESq_castPickerHead{flex-direction:column;align-items:flex-start}.dy0ESq_castSearch{width:100%}}.dy0ESq_lorebookPicker{border:1px solid var(--tv-border);background:color-mix(in srgb, var(--tv-surface-input) 55%, transparent);border-radius:12px;flex-direction:column;gap:10px;padding:12px;display:flex}.dy0ESq_lorebookPickerHead{flex-wrap:wrap;justify-content:space-between;align-items:center;gap:10px;display:flex}.dy0ESq_lorebookPickerTitleRow{flex-direction:column;gap:2px;display:flex}.dy0ESq_lorebookPickerTitle{font:var(--dsw-font-s-strong-14);color:var(--tv-accent-text)}.dy0ESq_lorebookPickerHint{font:var(--dsw-font-xxs-12);color:var(--tv-text-tertiary)}.dy0ESq_lorebookPickerActions{flex-wrap:wrap;align-items:center;gap:8px;display:flex}.dy0ESq_lorebookOrder{flex-wrap:wrap;align-items:center;gap:6px;display:flex}.dy0ESq_lorebookOrderLabel{font:var(--dsw-font-xxs-12);color:var(--tv-text-tertiary);margin-right:2px}.dy0ESq_lorebookOrderItem{border:1px solid var(--tv-border);background:var(--tv-surface-input);max-width:260px;color:var(--tv-text);cursor:pointer;transition:border-color var(--ds-transition-duration) var(--ds-ease-in-out), background var(--ds-transition-duration) var(--ds-ease-in-out);border-radius:999px;align-items:center;gap:6px;padding:4px 8px 4px 6px;display:inline-flex}.dy0ESq_lorebookOrderItem:hover{border-color:var(--tv-accent-border-strong)}.dy0ESq_lorebookOrderRank{background:var(--tv-accent-soft);min-width:18px;height:18px;color:var(--tv-accent-text);font:var(--dsw-font-xxxs-11);box-sizing:border-box;border-radius:999px;justify-content:center;align-items:center;padding:0 4px;font-weight:700;display:inline-flex}.dy0ESq_lorebookOrderName{font:var(--dsw-font-xxs-12);text-overflow:ellipsis;white-space:nowrap;overflow:hidden}.dy0ESq_lorebookOrderRemove{color:var(--tv-text-tertiary);font-size:14px;line-height:1}.dy0ESq_lorebookGrid{grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:10px;max-height:280px;padding:2px;display:grid;overflow-y:auto}.dy0ESq_lorebookCard{border:1px solid var(--tv-border);background:var(--tv-surface-card);min-width:0;color:var(--tv-text);text-align:left;cursor:pointer;transition:border-color var(--ds-transition-duration) var(--ds-ease-in-out), background var(--ds-transition-duration) var(--ds-ease-in-out), box-shadow var(--ds-transition-duration) var(--ds-ease-in-out), transform var(--ds-transition-duration) var(--ds-ease-in-out);border-radius:10px;align-items:center;gap:8px;padding:10px 12px;display:flex;position:relative}.dy0ESq_lorebookCard:hover{border-color:var(--tv-accent-border-strong);box-shadow:var(--dsw-shadow-lv1);transform:translateY(-1px)}.dy0ESq_lorebookCardSelected{border-color:var(--tv-accent-border-strong);background:linear-gradient(90deg, color-mix(in srgb, var(--tv-accent) 13%, transparent), transparent 160px), var(--tv-surface-card);box-shadow:inset 0 0 0 1px var(--tv-accent-border)}.dy0ESq_lorebookCardCheck{border:1.5px solid var(--tv-border-strong);width:20px;height:20px;color:var(--tv-primary-text);box-sizing:border-box;transition:border-color var(--ds-transition-duration) var(--ds-ease-in-out), background var(--ds-transition-duration) var(--ds-ease-in-out);border-radius:50%;flex-shrink:0;justify-content:center;align-items:center;font-size:13px;font-weight:700;display:flex}.dy0ESq_lorebookCardSelected .dy0ESq_lorebookCardCheck{border-color:var(--tv-accent-border-strong);background:var(--tv-accent)}.dy0ESq_lorebookCardBody{flex-direction:column;flex:1;gap:2px;min-width:0;display:flex}.dy0ESq_lorebookCardName{font:var(--dsw-font-xs-strong-13);color:var(--tv-text);text-overflow:ellipsis;white-space:nowrap;overflow:hidden}.dy0ESq_lorebookCardMeta{font:var(--dsw-font-xxxs-11);color:var(--tv-text-tertiary);text-overflow:ellipsis;white-space:nowrap;overflow:hidden}.dy0ESq_lorebookRank{background:var(--tv-accent-soft);color:var(--tv-accent-text);border:1px solid var(--tv-accent-border);font:var(--dsw-font-xxxs-11);border-radius:999px;flex-shrink:0;padding:2px 7px;font-weight:700}@media (width<=720px){.dy0ESq_lorebookPickerHead{flex-direction:column;align-items:flex-start}}.dy0ESq_thinking{border:1px dashed var(--tv-border);background:var(--tv-surface-card);border-radius:10px;overflow:hidden}.dy0ESq_thinkingToggle{width:100%;color:var(--tv-text-tertiary);font:var(--dsw-font-xxs-12);cursor:pointer;text-align:left;background:0 0;border:none;align-items:center;gap:6px;padding:5px 10px;display:flex}.dy0ESq_thinkingToggle:hover{color:var(--tv-text-secondary)}.dy0ESq_thinkingOpen{border-style:solid}.dy0ESq_thinkingOpen>.dy0ESq_thinkingToggle{color:var(--tv-text-secondary)}.dy0ESq_thinkingCaret{color:var(--tv-accent-text)}.dy0ESq_thinkingBody{color:var(--tv-text-secondary);font:var(--dsw-font-xs-13);white-space:pre-wrap;word-break:break-word;max-height:260px;padding:2px 10px 8px;overflow-y:auto}.dy0ESq_msgStatus{font:var(--dsw-font-xxs-12);color:var(--tv-text-tertiary);white-space:nowrap;text-overflow:ellipsis;overflow:hidden}.dy0ESq_msgStatusWarn{color:var(--dsw-alias-warning-text,#b45309)}.dy0ESq_msgStatusError{color:var(--dsw-alias-danger-text,#c43d3d);max-width:100%}.dy0ESq_msgStatusStreaming{font:var(--dsw-font-xxs-12);color:var(--tv-accent-text);align-items:center;gap:6px;display:inline-flex}.dy0ESq_msgActions{flex-wrap:wrap;align-items:center;gap:6px;display:flex}.dy0ESq_msgUser .dy0ESq_msgActions{justify-content:flex-end}.dy0ESq_msgActionBtn{border:1px solid var(--tv-border);color:var(--tv-text-tertiary);font:var(--dsw-font-xxs-12);cursor:pointer;transition:color var(--ds-transition-duration) var(--ds-ease-in-out), border-color var(--ds-transition-duration) var(--ds-ease-in-out);background:0 0;border-radius:999px;padding:2px 10px}.dy0ESq_msgActionBtn:hover:not(:disabled){color:var(--tv-accent-text);border-color:var(--tv-accent-border)}.dy0ESq_msgActionBtn:disabled{opacity:.45;cursor:default}.dy0ESq_swipeNav{border:1px solid var(--tv-border);border-radius:999px;align-items:center;gap:2px;padding:0 4px;display:inline-flex}.dy0ESq_swipeBtn{color:var(--tv-text-secondary);font:var(--dsw-font-s-14);cursor:pointer;background:0 0;border:none;border-radius:999px;width:22px;height:22px;line-height:1}.dy0ESq_swipeBtn:hover:not(:disabled){color:var(--tv-accent-text);background:var(--tv-accent-soft)}.dy0ESq_swipeBtn:disabled{opacity:.4;cursor:default}.dy0ESq_swipeCount{font:var(--dsw-font-xxxs-11);color:var(--tv-text-tertiary);text-align:center;user-select:none;min-width:34px}.dy0ESq_editArea{flex-direction:column;gap:6px;min-width:min(420px,100%);display:flex}.dy0ESq_editInput{resize:vertical;background:var(--tv-surface-input);border:1px solid var(--tv-border);color:var(--tv-text);font:var(--dsw-font-s-14);border-radius:10px;outline:none;padding:9px 12px;font-family:inherit}.dy0ESq_editInput:focus{border-color:var(--tv-focus)}.dy0ESq_stopBtn{border:1px solid var(--dsw-alias-danger-text,#c43d3d);color:var(--dsw-alias-danger-text,#c43d3d);background:0 0}.dy0ESq_stopBtn:hover:not(:disabled){background:color-mix(in srgb, var(--dsw-alias-danger-text,#c43d3d) 12%, transparent)}.tv-scene-rail{width:92px;flex-shrink:0;display:flex;flex-direction:column;align-items:center;gap:12px;padding:14px 6px;border-right:1px solid var(--tv-border);background:var(--tv-sidebar-fill);overflow-y:auto}.tv-scene-title{font-weight:600;font-size:12px;color:var(--tv-text)}.tv-scene-hint{font-size:10px;color:var(--tv-text-tertiary)}.tv-scene-character{display:flex;flex-direction:column;align-items:center;gap:5px;width:100%;padding:8px 2px;border:1px solid transparent;border-radius:12px;background:transparent;color:var(--tv-text-secondary);cursor:pointer}.tv-scene-character:hover:not(:disabled){background:var(--tv-hover)}.tv-scene-character:focus-visible{outline:2px solid var(--tv-focus)}.tv-scene-character:disabled{opacity:.5;cursor:default}.tv-scene-present{border-color:var(--tv-accent-border);background:var(--tv-accent-soft);color:var(--tv-accent-text)}.tv-character-avatar{display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;flex-shrink:0;overflow:hidden;border-radius:50%;background:var(--tv-accent-soft);border:1px solid var(--tv-border);color:var(--tv-accent-text);font-size:16px}.tv-character-avatar img{width:100%;height:100%;object-fit:cover}.tv-scene-character .tv-character-avatar{width:52px;height:52px;font-size:22px}.tv-scene-name{font-size:12px;max-width:100%;overflow-wrap:anywhere}.tv-scene-status{font-size:10px}.dy0ESq_msgName{display:inline-flex;align-items:center;gap:8px}@media(max-width:760px){.tv-scene-rail{width:66px;padding:10px 3px}.tv-scene-character .tv-character-avatar{width:40px;height:40px}.tv-scene-name{font-size:11px}.tv-scene-hint{font-size:9px}}.tv-scene-character.tv-scene-present:not(.tv-scene-current){border-color:var(--tv-border);background:transparent;color:var(--tv-text-secondary)}.tv-scene-current{box-shadow:inset 0 0 0 1px var(--tv-accent-border);background:var(--tv-accent-soft);color:var(--tv-accent-text)}.tv-settings-sheet{overflow:visible}.tv-settings-actions{position:sticky;top:0;z-index:10;background:var(--tv-surface-card);border-bottom:1px solid var(--tv-border);flex-wrap:wrap;box-shadow:0 4px 10px #0002}.tv-settings-actions>.dy0ESq_btn{min-width:0;min-height:32px;padding:6px 12px;flex:0 0 auto}.tv-settings-actions>.dy0ESq_btnGhost{background:transparent;border-color:transparent;color:var(--tv-text-secondary)}.tv-settings-actions>.dy0ESq_btnGhost:hover:not(:disabled){background:var(--tv-hover);color:var(--tv-text)}.tv-settings-management{display:flex;align-items:center;justify-content:space-between;gap:16px;border-top:1px solid var(--tv-border);margin-top:8px;padding-top:16px}" + ".tv-background-stage{position:relative;isolation:isolate;overflow:hidden;display:flex;flex-direction:column;flex:1;min-height:0}.tv-character-backdrop{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;object-position:center;pointer-events:none;z-index:0;transition:opacity .25s ease}.tv-character-shade{position:absolute;inset:0;background:#000;pointer-events:none;z-index:1;transition:opacity .12s ease}.tv-background-stage>.dy0ESq_messages{position:relative;z-index:2;box-sizing:border-box}.tv-has-character-background .dy0ESq_msgBubble{background:color-mix(in srgb,var(--tv-surface-card) var(--tv-bubble-opacity,50%),transparent)}.tv-has-character-background .dy0ESq_msgUser .dy0ESq_msgBubble{background:color-mix(in srgb,var(--tv-bubble-user) var(--tv-bubble-opacity,50%),transparent)}.tv-has-character-background .dy0ESq_msgName,.tv-has-character-background .dy0ESq_msgTime,.tv-has-character-background .dy0ESq_msgActions,.tv-has-character-background .dy0ESq_msgStatus,.tv-has-character-background .dy0ESq_empty{background:color-mix(in srgb,var(--tv-surface-card) var(--tv-bubble-opacity,50%),transparent);border-radius:10px;padding:3px 8px}.tv-background-controls{display:flex;align-items:center;gap:12px;flex-wrap:wrap;font-size:12px;color:var(--tv-text-secondary)}.tv-background-controls label{display:inline-flex;align-items:center;gap:6px;cursor:pointer}.tv-background-controls input[type=range]{width:90px;accent-color:var(--tv-accent)}.tv-background-controls input[type=checkbox]{accent-color:var(--tv-accent)}.tv-background-value{min-width:30px;font-variant-numeric:tabular-nums}.dy0ESq_chatHead:has(.tv-background-controls){flex-wrap:wrap}@media(prefers-reduced-motion:reduce){.tv-character-backdrop,.tv-character-shade{transition:none}}" + ".tv-avatar-preview-trigger{border:0;padding:0;background:transparent;cursor:zoom-in;display:inline-flex;border-radius:12px;flex-shrink:0}.tv-avatar-preview-trigger:focus-visible{outline:2px solid var(--tv-focus);outline-offset:4px}.tv-avatar-preview-dialog{padding:16px;border:1px solid #ffffff30;border-radius:14px;background:#202024;color:#f4f4f5;max-width:calc(100vw - 32px);max-height:calc(100dvh - 32px);box-sizing:border-box;overflow:auto;box-shadow:0 16px 64px #0008}.tv-avatar-preview-dialog::backdrop{background:#000c}.tv-avatar-preview-head{display:flex;align-items:center;justify-content:space-between;gap:24px;margin-bottom:12px;font-size:14px}.tv-avatar-preview-dialog button{color:#f4f4f5;background:#ffffff15;border:1px solid #ffffff30;cursor:pointer}.tv-avatar-preview-image{display:block;max-width:calc(100vw - 68px);max-height:calc(100dvh - 120px);width:auto;height:auto;object-fit:contain;border-radius:8px}";
+		const fullscreenCss = ".tv-play-tools button[aria-pressed=true]{background:var(--tv-accent-soft);color:var(--tv-accent-text);border-color:var(--tv-accent-border)}.tv-play-row{display:flex;align-items:center;gap:6px}.tv-play-row>.dy0ESq_listItem{flex:1;min-width:0}.tv-play-tools{display:flex;gap:6px;padding-right:4px}.tv-play-tools button{width:28px;height:28px;padding:0;border:1px solid var(--tv-border);border-radius:6px;background:transparent;color:var(--tv-text-secondary);cursor:pointer}.tv-play-tools button:hover:not(:disabled){background:var(--tv-hover);color:var(--tv-text)}.tv-play-tools button:disabled{opacity:.45;cursor:default}.dy0ESq_msgActionBtn.tv-copy-message{margin-inline-start:auto;display:inline-grid;place-items:center;width:30px;height:30px;padding:0;border-color:transparent;border-radius:8px}.tv-copy-status{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}.tv-chat-fullscreen .dy0ESq_chatHead{position:relative;padding-right:56px;min-height:48px;box-sizing:border-box}.tv-fullscreen-button{display:inline-grid;place-items:center;width:32px;height:32px;padding:0;flex:none}.dy0ESq_chatHead>.tv-fullscreen-button{position:absolute;top:8px;right:12px}.tv-chat-fullscreen.tv-chat-expanded{position:fixed;inset:0;z-index:2147483647;width:100%;height:100%;background:var(--tv-bg,Canvas);overflow:hidden}.tv-chat-fullscreen.tv-chat-expanded>.dy0ESq_sidebar{display:none}.tv-chat-fullscreen.tv-chat-expanded .dy0ESq_chat{min-width:0}.tv-chat-fullscreen.tv-chat-expanded .dy0ESq_chatHead{flex-wrap:wrap}";
 		const tagId = "dsh-tavern/TavernView.module.css";
 		if (typeof document !== "undefined" && document.querySelector("style[data-plugin-css=" + JSON.stringify(tagId) + "]") === null) {
 			const tag = document.createElement("style");
 			tag.dataset.plugin = "dsh-tavern";
 			tag.dataset.pluginCss = tagId;
-			tag.textContent = css;
+			tag.textContent = css + fullscreenCss;
 			document.head.appendChild(tag);
 		}
 		var TavernView_module_css_default = {
@@ -430,6 +471,26 @@ window.__ModuleLoader__.load({
 				disabled: props.disabled,
 				title: props.title,
 				children: props.children
+			});
+		}
+		function FullscreenButton({ fullscreen, onClick }) {
+			const label = fullscreen ? "退出全屏（连按两次 Esc）" : "全屏";
+			return react_jsx_runtime.jsx("button", {
+				type: "button",
+				className: TavernView_module_css_default.btn + " " + TavernView_module_css_default.btnGhost + " tv-fullscreen-button",
+				onClick,
+				title: label,
+				"aria-label": label,
+				children: react_jsx_runtime.jsx("svg", {
+					width: 18, height: 18, viewBox: "0 0 24 24",
+					fill: "none", stroke: "currentColor", strokeWidth: 2,
+					strokeLinecap: "round", strokeLinejoin: "round",
+					"aria-hidden": true,
+					children: react_jsx_runtime.jsx("path", {
+						d: fullscreen ? "M3 9h6V3 M21 9h-6V3 M3 15h6v6 M21 15h-6v6"
+							: "M9 3H3v6 M15 3h6v6 M9 21H3v-6 M15 21h6v-6"
+					})
+				})
 			});
 		}
 		function Field(props) {
@@ -801,7 +862,257 @@ function projectScene(items, characterNames, initialNames, override) {
 			});
 		}
 
+        // Local appearance preferences only; never written to character cards or plays.
+        const CHARACTER_BACKGROUND_KEY = "dsh-tavern.character-background.v1";
+        function normalizeCharacterBackground(value) {
+            return { enabled: typeof value?.enabled === "boolean" ? value.enabled : true,
+                brightness: typeof value?.brightness === "number" && Number.isFinite(value.brightness)
+                    ? Math.max(10, Math.min(70, value.brightness)) : 30,
+                bubbleTransparency: typeof value?.bubbleTransparency === "number" && Number.isFinite(value.bubbleTransparency)
+                    ? Math.max(0, Math.min(100, value.bubbleTransparency)) : 50,
+                fit: value?.fit === "cover" ? "cover" : "contain" };
+        }
+        function singleCharacterBackground(play, characters, activeCharacterIds, sceneCharacterIds) {
+            const cast = play?.characterIds ?? [];
+            if (cast.length === 0) return void 0;
+            // Match the scene rail. If several roles are current, the last listed role wins.
+            const current = activeCharacterIds ?? sceneCharacterIds ?? play.sceneCharacterIds ?? cast.slice(0, 1);
+            const id = cast.length === 1 ? cast[0] : current.filter(id => cast.includes(id)).at(-1);
+            return avatarSrc(characters.find(character => character.id === id)?.avatar);
+        }
+        function useCharacterBackground() {
+            const [prefs, setPrefs] = react.useState(() => {
+                try { return normalizeCharacterBackground(JSON.parse(window.localStorage.getItem(CHARACTER_BACKGROUND_KEY))); }
+                catch (_) { return normalizeCharacterBackground(null); }
+            });
+            const [storageError, setStorageError] = react.useState(false);
+            const update = patch => {
+                const next = normalizeCharacterBackground({ ...prefs, ...patch });
+                setPrefs(next);
+                try { window.localStorage.setItem(CHARACTER_BACKGROUND_KEY, JSON.stringify(next)); setStorageError(false); }
+                catch (_) { setStorageError(true); }
+            };
+            return { prefs, update, storageError };
+        }
+        function CharacterBackgroundControls({ prefs, update, storageError }) {
+            return react_jsx_runtime.jsxs("div", { className: "tv-background-controls", children: [
+                react_jsx_runtime.jsxs("label", { children: [
+                    react_jsx_runtime.jsx("input", { type: "checkbox", checked: prefs.enabled,
+                        onChange: event => update({ enabled: event.target.checked }) }), "角色背景"
+                ] }),
+                react_jsx_runtime.jsxs("label", { title: "仅调节背景亮度，不改变图片清晰度", children: ["背景亮度", "暗",
+                    react_jsx_runtime.jsx("input", { type: "range", min: 10, max: 70, step: 1,
+                        "aria-label": "角色背景明暗", "aria-valuetext": `亮度 ${prefs.brightness}%`,
+                        value: prefs.brightness, disabled: !prefs.enabled,
+                        onChange: event => update({ brightness: Number(event.target.value) }) }), "亮",
+                    react_jsx_runtime.jsx("span", { className: "tv-background-value", children: `${prefs.brightness}%` })
+                ] }),
+                react_jsx_runtime.jsxs("label", { children: ["背景适配",
+                    react_jsx_runtime.jsxs("select", { className: TavernView_module_css_default.styleSelect,
+                        "aria-label": "背景适配", value: prefs.fit, disabled: !prefs.enabled,
+                        onChange: event => update({ fit: event.target.value }), children: [
+                            react_jsx_runtime.jsx("option", { value: "contain", children: "完整显示" }),
+                            react_jsx_runtime.jsx("option", { value: "cover", children: "铺满（裁切）" })
+                        ] })
+                ] }),
+                react_jsx_runtime.jsxs("label", { title: "0% 为不透明，100% 为完全透明；只调整文字底色", children: ["文字底色透明度",
+                    react_jsx_runtime.jsx("input", { type: "range", min: 0, max: 100, step: 1,
+                        "aria-label": "文字底色透明度", "aria-valuetext": `透明度 ${prefs.bubbleTransparency}%`,
+                        value: prefs.bubbleTransparency, disabled: !prefs.enabled,
+                        onChange: event => update({ bubbleTransparency: Number(event.target.value) }) }),
+                    react_jsx_runtime.jsx("span", { className: "tv-background-value", children: `${prefs.bubbleTransparency}%` })
+                ] }),
+                storageError && react_jsx_runtime.jsx("span", { role: "status", children: "本次可用，但无法保存背景偏好" })
+            ] });
+        }
+        function CharacterBackdrop({ src, playId, brightness, bubbleTransparency = 50, fit = "contain", children }) {
+            const [loadedSrc, setLoadedSrc] = react.useState(null);
+            const [preview, setPreview] = react.useState(false);
+            react.useEffect(() => setPreview(false), [playId, src]);
+            const visible = !!src && loadedSrc === src;
+            const showingPreview = visible && preview;
+            const togglePreview = (event) => {
+                if (!visible || event.button !== 0) return;
+                const stage = event.currentTarget;
+                const list = stage.lastElementChild;
+                if (event.target !== stage && event.target !== list) return;
+                const selection = stage.ownerDocument.getSelection();
+                if (!showingPreview && selection && !selection.isCollapsed && stage.contains(selection.anchorNode)) return;
+                setPreview(value => !value);
+            };
+            return react_jsx_runtime.jsxs("div", {
+                className: "tv-background-stage" + (visible ? " tv-has-character-background" : ""),
+                style: { "--tv-bubble-opacity": `${100 - bubbleTransparency}%` },
+                onClick: togglePreview,
+                children: [
+                    src && react_jsx_runtime.jsx("img", { className: "tv-character-backdrop", src, alt: "", "aria-hidden": true,
+                        draggable: false, style: { opacity: visible ? 1 : 0, objectFit: showingPreview || fit !== "cover" ? "contain" : "cover" },
+                        onLoad: () => setLoadedSrc(src), onError: () => setLoadedSrc(null) }, src),
+                    visible && !showingPreview && react_jsx_runtime.jsx("div", { className: "tv-character-shade", "aria-hidden": true,
+                        style: { opacity: 1 - brightness / 100 } }),
+                    react.cloneElement(children, showingPreview ? { style: { visibility: "hidden" } } : {})
+            ] });
+        }
+        // End character background.
+
+        function MemoryDraft({ play, characters, busy, onSaved, onCompact }) {
+            const [open, setOpen] = react.useState(false);
+            const [selected, setSelected] = react.useState("");
+            const [draft, setDraft] = react.useState(null);
+            const [compactAfterSave, setCompactAfterSave] = react.useState(false);
+            const [working, setWorking] = react.useState(false);
+            const [notice, setNotice] = react.useState("");
+            const cast = play.characterIds.map(id => characters.find(character => character.id === id)).filter(Boolean);
+            const character = cast.find(item => item.id === selected) ?? cast[0];
+            const generate = async () => {
+                setWorking(true);
+                setNotice("");
+                try {
+                    setDraft(await tavernApi.draftCharacterMemory(play.id, character.id));
+                } catch (error) {
+                    setNotice(error.message);
+                } finally {
+                    setWorking(false);
+                }
+            };
+            const save = async () => {
+                setWorking(true);
+                setNotice("");
+                try {
+                    const memory = play.characterMemories?.[character.id];
+                    if (memory?.suspended) throw Error("请先在角色经历页核对暂停使用的旧经历。");
+                    const entries = memory?.book.entries ?? [];
+                    await tavernApi.updateCharacterMemory(play.id, character.id, {
+                        name: memory?.name ?? character.name + "·经历",
+                        enabled: memory?.enabled ?? true,
+                        expectedUpdatedAt: draft.expectedUpdatedAt,
+                        draftSource: draft.draftSource,
+                        book: { ...memory?.book, entries: [...entries, {
+                            uid: entries.reduce((max, entry) => Math.max(max, entry.uid), -1) + 1,
+                            key: [], keysecondary: [], comment: "会话经历总结", content: draft.text.trim(),
+                            constant: true, disable: false, order: 80
+                        }] }
+                    });
+                    setDraft(null);
+                    setOpen(false);
+                    setNotice("经历已保存");
+                    setCompactAfterSave(false);
+                    if (compactAfterSave) {
+                        const compacted = await onCompact();
+                        if (!compacted) {
+                            setNotice("经历已保存，压缩未完成。");
+                            await onSaved();
+                        }
+                    } else {
+                        await onSaved();
+                    }
+                } catch (error) {
+                    setNotice(error.message);
+                } finally {
+                    setWorking(false);
+                }
+            };
+            return react_jsx_runtime.jsxs("div", { children: [
+                !open && react_jsx_runtime.jsx(Button, {
+                    disabled: busy || working || !character,
+                    onClick: () => { setOpen(true); setNotice(""); if (cast.length === 1) void generate(); },
+                    children: "总结经历"
+                }),
+                open && react_jsx_runtime.jsxs("div", { children: [
+                    react_jsx_runtime.jsx("select", {
+                        "aria-label": "总结经历的角色", value: character?.id ?? "",
+                        disabled: working || !!draft, onChange: event => setSelected(event.target.value),
+                        children: cast.map(item => react_jsx_runtime.jsx("option", { value: item.id, children: item.name }, item.id))
+                    }),
+                    draft && react_jsx_runtime.jsx("textarea", {
+                        className: TavernView_module_css_default.composerInput,
+                        style: { display: "block", width: "100%", boxSizing: "border-box", maxHeight: "30vh" },
+                        rows: 5, "aria-label": "角色经历草稿", value: draft.text, disabled: working,
+                        onChange: event => setDraft({ ...draft, text: event.target.value })
+                    }),
+                    draft && react_jsx_runtime.jsxs("label", {
+                        style: { display: "block", marginBlock: "8px" },
+                        children: [
+                            react_jsx_runtime.jsx("input", {
+                                type: "checkbox", checked: compactAfterSave, disabled: working,
+                                onChange: event => setCompactAfterSave(event.target.checked)
+                            }),
+                            " 保存后压缩上下文（会额外调用一次模型）"
+                        ]
+                    }),
+                    react_jsx_runtime.jsx(Button, {
+                        disabled: busy || working || !character || (!!draft && !draft.text.trim()),
+                        onClick: draft ? save : generate,
+                        children: working ? "处理中…" : draft ? "确认保存经历" : "生成草稿（调用模型）"
+                    }),
+                    react_jsx_runtime.jsx(Button, {
+                        variant: "ghost", disabled: working,
+                        onClick: () => { setOpen(false); setDraft(null); setCompactAfterSave(false); setNotice(""); },
+                        children: draft ? "丢弃草稿" : "取消"
+                    })
+                ] }),
+                notice && react_jsx_runtime.jsx("span", { role: "status", children: notice })
+            ] });
+        }
 		function ChatPanel(props) {
+			const archiveKey = "dsh-tavern.archived-play-ids.v1";
+			const [archivedIds, setArchivedIds] = react.useState(() => {
+				try {
+					const ids = JSON.parse(localStorage.getItem(archiveKey) ?? "[]");
+					return Array.isArray(ids) ? ids : [];
+				} catch {
+					return [];
+				}
+			});
+			const [showArchive, setShowArchive] = react.useState(false);
+			const [archiveError, setArchiveError] = react.useState("");
+			const pinKey = "dsh-tavern.pinned-play-ids.v1";
+			const [pinnedIds, setPinnedIds] = react.useState(() => {
+				try {
+					const ids = JSON.parse(localStorage.getItem(pinKey) ?? "[]");
+					return Array.isArray(ids) ? ids : [];
+				} catch {
+					return [];
+				}
+			});
+			const visiblePlays = props.plays.filter(play => archivedIds.includes(play.id) === showArchive);
+			if (!showArchive) visiblePlays.sort((a, b) => Number(pinnedIds.includes(b.id)) - Number(pinnedIds.includes(a.id)));
+			const togglePin = id => {
+				const next = pinnedIds.includes(id) ? pinnedIds.filter(item => item !== id) : [...pinnedIds, id];
+				try {
+					localStorage.setItem(pinKey, JSON.stringify(next));
+					setPinnedIds(next);
+					setArchiveError("");
+				} catch {
+					setArchiveError("无法保存置顶状态。");
+				}
+			};
+			const toggleArchive = play => {
+				if (!showArchive && !confirmAction(`归档「${play.title}」？可以从归档列表恢复，会保留聊天记录。`)) return;
+				const next = showArchive ? archivedIds.filter(id => id !== play.id) : [...archivedIds, play.id];
+				try {
+					localStorage.setItem(archiveKey, JSON.stringify(next));
+					setArchivedIds(next);
+					setArchiveError("");
+					if (!showArchive && play.id === props.activePlayId) props.onSelectPlay(null);
+				} catch {
+					setArchiveError("无法保存归档状态。");
+				}
+			};
+			const createFromPlay = async play => {
+				if (!confirmAction(`沿用「${play.title}」的配置新建空白会话？`)) return;
+				setCreating(true);
+				try {
+					await props.onCreatePlay(`${play.title}（新会话）`, play.characterIds, play.lorebookIds ?? [], play.presetId, play.narratorEnabled, play.multiAgent, -1, { provider: play.provider, model: play.model, maxTokens: play.maxTokens });
+					setShowArchive(false);
+				} catch {
+					// The shared creation handler displays the error.
+				} finally {
+					setCreating(false);
+				}
+			};
+            const background = useCharacterBackground();
+            const backgroundSrc = singleCharacterBackground(props.activePlay, props.characters, props.activeCharacterIds, props.sceneCharacterIds);
 			const { running } = props;
 			const [draft, setDraft] = (0, react.useState)("");
 			const [title, setTitle] = (0, react.useState)("");
@@ -810,6 +1121,9 @@ function projectScene(items, characterNames, initialNames, override) {
 			const [lorebookIds, setLorebookIds] = (0, react.useState)([]);
 			const [lorebookQuery, setLorebookQuery] = (0, react.useState)("");
 			const [presetId, setPresetId] = (0, react.useState)(void 0);
+			const [playProvider, setPlayProvider] = (0, react.useState)("");
+			const [playModel, setPlayModel] = (0, react.useState)("");
+			const [groupReply, setGroupReply] = react.useState({ main: "auto", others: "auto" });
 			const [narratorEnabled, setNarratorEnabled] = (0, react.useState)(false);
 			const [multiAgent, setMultiAgent] = (0, react.useState)(true);
 			const [creating, setCreating] = (0, react.useState)(false);
@@ -823,7 +1137,10 @@ function projectScene(items, characterNames, initialNames, override) {
 				setSelectedIds([...play.characterIds]);
 				setLorebookIds([...(play.lorebookIds ?? [])]);
 				setPresetId(play.presetId);
+				setPlayProvider(play.provider ?? "");
+				setPlayModel(play.model ?? "");
 				setNarratorEnabled(play.narratorEnabled ?? false);
+                setGroupReply(play.groupReply ?? { main: "auto", others: "auto" });
 				setMultiAgent(play.multiAgent ?? false);
 				setCharacterQuery("");
 				setLorebookQuery("");
@@ -832,6 +1149,40 @@ function projectScene(items, characterNames, initialNames, override) {
 			};
 			const listRef = (0, react.useRef)(null);
 			const pinnedRef = (0, react.useRef)(true);
+			const scrollPositionRef = react.useRef(null);
+			const [fullscreen, setFullscreen] = react.useState(false);
+			react.useLayoutEffect(() => {
+				const list = listRef.current;
+				const position = scrollPositionRef.current;
+				if (!list || !position) return;
+				list.scrollTop = position.bottom ? list.scrollHeight : position.top;
+				pinnedRef.current = list.scrollHeight - list.scrollTop - list.clientHeight < 80;
+			}, [fullscreen]);
+			react.useEffect(() => {
+				if (!fullscreen) return;
+				let firstEscape = null;
+				const onKeyDown = (event) => {
+					if (event.key !== "Escape" || event.isComposing) {
+						firstEscape = null;
+						return;
+					}
+					if (event.defaultPrevented || event.repeat) return;
+					const now = performance.now();
+					if (firstEscape !== null && now - firstEscape <= 700) {
+						event.preventDefault();
+						setFullscreen(false);
+					}
+					firstEscape = now;
+				};
+				const reset = () => { firstEscape = null; };
+				window.addEventListener("keydown", onKeyDown);
+				window.addEventListener("blur", reset);
+				return () => {
+					window.removeEventListener("keydown", onKeyDown);
+					window.removeEventListener("blur", reset);
+				};
+			}, [fullscreen]);
+			const toggleFullscreen = () => setFullscreen(value => !value);
 			const lastRef = (0, react.useRef)({
 				playKey: null,
 				count: 0
@@ -892,8 +1243,9 @@ function projectScene(items, characterNames, initialNames, override) {
 			const clearSelection = () => {
 				setSelectedIds([]);
 			};
+			const hasPartialModel = (playProvider.trim() !== "") !== (playModel.trim() !== "");
 			const submitCreate = async () => {
-				if (selectedCharacters.length === 0) return;
+				if (selectedCharacters.length === 0 || hasPartialModel) return;
 				setCreating(true);
 				try {
 					if (editingSettings) {
@@ -902,13 +1254,19 @@ function projectScene(items, characterNames, initialNames, override) {
 							characterIds: selectedCharacters.map(character => character.id),
 							lorebookIds: selectedLorebooks.map(book => book.id),
 							presetId: presetId ?? null,
+							provider: playProvider.trim() === "" ? null : playProvider.trim(),
+							model: playModel.trim() === "" ? null : playModel.trim(),
 							narratorEnabled,
 							multiAgent: multiAgent && props.multiAgentAvailable,
-							expectedUpdatedAt: settingsVersion
+							...(selectedCharacters.length > 1 ? { groupReply } : {}),
+                            expectedUpdatedAt: settingsVersion
 						});
 						setEditingSettings(false);
 					} else {
-						await props.onCreatePlay(title.trim(), selectedCharacters.map((character) => character.id), selectedLorebooks.map((book) => book.id), presetId, narratorEnabled, multiAgent && props.multiAgentAvailable);
+						await props.onCreatePlay(title.trim(), selectedCharacters.map((character) => character.id), selectedLorebooks.map((book) => book.id), presetId, narratorEnabled, multiAgent && props.multiAgentAvailable, void 0, {
+							provider: playProvider.trim() || void 0,
+							model: playModel.trim() || void 0
+						});
 					}
 					setTitle("");
 					setSelectedIds([]);
@@ -916,6 +1274,8 @@ function projectScene(items, characterNames, initialNames, override) {
 					setLorebookIds([]);
 					setLorebookQuery("");
 					setPresetId(void 0);
+					setPlayProvider("");
+					setPlayModel("");
 				} catch {} finally {
 					setCreating(false);
 				}
@@ -943,7 +1303,9 @@ function projectScene(items, characterNames, initialNames, override) {
 			const inPlaySession = props.activeSessionId !== void 0;
 			const formActions = /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 				className: TavernView_module_css_default.createFooter + (editingSettings ? " tv-settings-actions" : ""),
-				children: [editingSettings && (0, react_jsx_runtime.jsx)(Button, {
+				children: [
+					fullscreen && react_jsx_runtime.jsx(FullscreenButton, { fullscreen, onClick: toggleFullscreen }),
+					editingSettings && (0, react_jsx_runtime.jsx)(Button, {
 					variant: "ghost",
 					disabled: creating,
 					onClick: () => setEditingSettings(false),
@@ -959,24 +1321,31 @@ function projectScene(items, characterNames, initialNames, override) {
 				})]
 			});
 			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-				className: TavernView_module_css_default.body,
+				className: TavernView_module_css_default.body + " tv-chat-fullscreen" + (fullscreen ? " tv-chat-expanded" : ""),
 				children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 					className: TavernView_module_css_default.sidebar,
 					children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 						className: TavernView_module_css_default.sidebarHead,
 						children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
 							className: TavernView_module_css_default.sidebarTitle,
-							children: "酒馆会话"
-						}), props.activePlayId !== null && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(Button, {
+							children: showArchive ? "已归档" : "酒馆会话"
+						}), react_jsx_runtime.jsx(Button, {
+							variant: "ghost",
+							onClick: () => setShowArchive(!showArchive),
+							children: showArchive ? "返回" : "归档"
+						}), !showArchive && props.activePlayId !== null && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(Button, {
 							variant: "ghost",
 							onClick: () => props.onSelectPlay(null),
 							children: "＋ 新建"
 						})]
 					}), /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 						className: TavernView_module_css_default.list,
-						children: [props.plays.length === 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(Empty, { text: "还没有会话，从右侧挑选角色开始第一场扮演" }), props.plays.map((play) => {
+						children: [
+							archiveError && react_jsx_runtime.jsx("span", { role: "alert", children: archiveError }),
+							visiblePlays.length === 0 && react_jsx_runtime.jsx(Empty, { text: showArchive ? "没有已归档的会话" : "没有未归档的会话" }),
+							visiblePlays.map((play) => {
 							const cast = play.characterIds.map((id) => props.characters.find((character) => character.id === id)).filter((character) => character !== void 0);
-							return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("button", {
+							return react_jsx_runtime.jsxs("div", { className: "tv-play-row", children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("button", {
 								type: "button",
 								className: `${TavernView_module_css_default.listItem} ${play.id === props.activePlayId ? TavernView_module_css_default.listItemActive : ""}`,
 								onClick: () => props.onSelectPlay(play.id),
@@ -1017,7 +1386,39 @@ function projectScene(items, characterNames, initialNames, override) {
 										})
 									]
 								})]
-							}, play.id);
+							 }), react_jsx_runtime.jsxs("div", {
+								className: "tv-play-tools",
+								children: [
+									!showArchive && react_jsx_runtime.jsx("button", {
+										type: "button",
+										title: pinnedIds.includes(play.id) ? "取消置顶" : "置顶",
+										"aria-label": `置顶「${play.title}」`,
+										"aria-pressed": pinnedIds.includes(play.id),
+										onClick: () => togglePin(play.id),
+										children: react_jsx_runtime.jsx("svg", {
+											width: 15, height: 15, viewBox: "0 0 24 24", fill: "none",
+											stroke: "currentColor", strokeWidth: 1.7, "aria-hidden": true,
+											children: react_jsx_runtime.jsx("path", { d: "M8 4h8l-1 6 3 3v2H6v-2l3-3z M12 15v6" })
+										})
+									}),
+									!showArchive && react_jsx_runtime.jsx("button", {
+										type: "button", disabled: creating || running || props.branching || editingSettings || draft !== "",
+										title: "沿用配置新建空白会话", "aria-label": `沿用「${play.title}」的配置新建空白会话`,
+										onClick: () => createFromPlay(play), children: "＋"
+									}),
+									react_jsx_runtime.jsx("button", {
+										type: "button", disabled: creating || running || props.branching || editingSettings || draft !== "",
+										title: showArchive ? "恢复会话" : "归档会话",
+										"aria-label": `${showArchive ? "恢复" : "归档"}「${play.title}」`,
+										onClick: () => toggleArchive(play),
+										children: showArchive ? "↶" : react_jsx_runtime.jsx("svg", {
+											width: 15, height: 15, viewBox: "0 0 24 24", fill: "none",
+											stroke: "currentColor", strokeWidth: 1.7, "aria-hidden": true,
+											children: react_jsx_runtime.jsx("path", { d: "M3 4h18v5H3z M5 9v11h14V9 M9 13h6" })
+										})
+									})
+								]
+							})] }, play.id);
 						})]
 					})]
 				}), props.activePlay && !editingSettings && (0, react_jsx_runtime.jsx)(SceneRail, {
@@ -1051,6 +1452,20 @@ function projectScene(items, characterNames, initialNames, override) {
 									})]
 								}),
 								editingSettings && formActions,
+                                editingSettings && selectedCharacters.length > 1 && react_jsx_runtime.jsxs("fieldset", {
+                                    children: [
+                                        react_jsx_runtime.jsx("legend", { children: "群聊选项" }),
+                                        ...[["main", "主角色"], ["others", "其他角色"]].map(([key, label]) =>
+                                            react_jsx_runtime.jsx(Field, { label, children: react_jsx_runtime.jsxs("select", {
+                                                className: TavernView_module_css_default.fieldInput,
+                                                value: groupReply[key], onChange: event => setGroupReply({ ...groupReply, [key]: event.target.value }),
+                                                children: [
+                                                    react_jsx_runtime.jsx("option", { value: "click", children: "点击头像" }),
+                                                    react_jsx_runtime.jsx("option", { value: "auto", children: "自动回复" })
+                                                ]
+                                            }) }, key))
+                                    ]
+                                }),
 								/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 									className: TavernView_module_css_default.createBasics,
 									children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)(Field, {
@@ -1062,17 +1477,78 @@ function projectScene(items, characterNames, initialNames, override) {
 											onChange: (event) => setTitle(event.target.value)
 										})
 									}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)(Field, {
-										label: "预设与模型",
+										label: "预设（Prompt 与参数）",
 										children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(Select, {
 											value: presetId,
 											onChange: value => setPresetId(value || void 0),
-											options: [{ value: "", label: "使用默认模型" }, ...props.presets.map((preset) => ({
+											options: props.presets.map((preset) => ({
 												value: preset.id,
 												label: preset.name
-											}))],
-											placeholder: "（使用默认模型）"
+											})),
+											placeholder: "（不使用预设）"
 										})
-									})]
+									}), (() => {
+										const modelChoices = [];
+										const seenKeys = new Set();
+										for (const item of [...props.presets, ...(props.plays ?? [])]) {
+											const p = (item.provider || "").trim();
+											const m = (item.model || "").trim();
+											if (!p || !m) continue;
+											const key = p + "\u0000" + m;
+											if (seenKeys.has(key)) continue;
+											seenKeys.add(key);
+											const label = item.name ? `${item.name} (${p} / ${m})` : `${p} / ${m}`;
+											modelChoices.push({ value: key, label, provider: p, model: m });
+										}
+										const currentKey = playProvider.trim() === "" && playModel.trim() === "" ? "" : playProvider.trim() + "\u0000" + playModel.trim();
+										const matched = modelChoices.some((c) => c.value === currentKey);
+										const selectedPreset = props.presets.find((p) => p.id === presetId);
+										const presetHasPair = Boolean(selectedPreset?.provider?.trim() && selectedPreset?.model?.trim());
+										const dshDefaultText = props.defaultModel?.model ? [props.defaultModel.provider, props.defaultModel.model].filter(Boolean).join(" / ") : "未配置";
+										const defaultSourceText = presetHasPair ? `预设「${selectedPreset.name}」(${selectedPreset.provider.trim()} / ${selectedPreset.model.trim()})` : `DSH 默认 (${dshDefaultText})`;
+										const defaultLabel = `跟随默认：${defaultSourceText}`;
+										return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(Field, {
+											label: "模型与 API（独立于预设）",
+											children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("select", {
+												className: TavernView_module_css_default.fieldSelect,
+												value: currentKey === "" ? "" : matched ? currentKey : "__custom__",
+												onChange: (event) => {
+													const val = event.target.value;
+													if (val === "") { setPlayProvider(""); setPlayModel(""); }
+													else if (val !== "__custom__") {
+														const found = modelChoices.find((c) => c.value === val);
+														if (found) { setPlayProvider(found.provider); setPlayModel(found.model); }
+													}
+												},
+												children: [
+													/* @__PURE__ */ (0, react_jsx_runtime.jsx)("option", { value: "", children: defaultLabel }),
+													modelChoices.map((c) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)("option", { value: c.value, children: c.label }, c.value)),
+													!matched && currentKey !== "" && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("option", { value: "__custom__", children: `自定义：${[playProvider, playModel].filter(Boolean).join(" / ")}` })
+												]
+											}), /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+												style: { display: "flex", gap: 6, marginTop: 6 },
+												children: [
+													/* @__PURE__ */ (0, react_jsx_runtime.jsx)("input", {
+														className: TavernView_module_css_default.fieldInput,
+														value: playProvider,
+														placeholder: "Provider（留空用默认）",
+														"aria-label": "会话 Provider",
+														onChange: (event) => setPlayProvider(event.target.value)
+													}),
+													/* @__PURE__ */ (0, react_jsx_runtime.jsx)("input", {
+														className: TavernView_module_css_default.fieldInput,
+														value: playModel,
+														placeholder: "模型 ID（留空用默认）",
+														"aria-label": "会话模型",
+														onChange: (event) => setPlayModel(event.target.value)
+													})
+												]
+											}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+												style: { fontSize: 12, marginTop: 4, color: hasPartialModel ? "var(--danger, #e5484d)" : "var(--text-muted, #9a9082)" },
+												children: hasPartialModel ? `请同时填写 Provider 与模型 ID，或同时留空以使用默认来源（${defaultSourceText}）` : currentKey === "" ? `当前默认来源：${defaultSourceText}` : `当前会话配置：${playProvider.trim()} / ${playModel.trim()}`
+											})]
+										});
+									})()]
 								}),
 								/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 									className: TavernView_module_css_default.lorebookPicker,
@@ -1430,30 +1906,33 @@ function projectScene(items, characterNames, initialNames, override) {
 									children: props.activePlayTitle ?? "酒馆会话"
 								}),
 								(0, react_jsx_runtime.jsx)(Button, {
-									variant: "ghost",
 									disabled: running || props.branching,
 									onClick: openSettings,
 									children: "会话设置"
 								}),
+
                                 (0, react_jsx_runtime.jsx)(Button, {
-                                    variant: "ghost", disabled: running || props.branching || !inPlaySession,
+                                    disabled: running || props.branching || !inPlaySession,
                                     title: "使用当前模型生成剧情摘要，会产生 API 用量；原始日志保留。",
                                     onClick: props.onCompact, children: "压缩上下文"
                                 }),
+                                props.activePlay?.characterIds?.length > 0 && react_jsx_runtime.jsx(CharacterBackgroundControls, background),
                                 props.compactNotice && (0, react_jsx_runtime.jsx)("span", { role: "status", children: props.compactNotice }),
 								!inPlaySession && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
 									className: TavernView_module_css_default.badge,
 									children: "当前会话未绑定，请从左侧选择"
 								}),
-								/* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", { style: { flex: 1 } })
+								react_jsx_runtime.jsx(FullscreenButton, { fullscreen, onClick: toggleFullscreen })
 							]
 						}),
-						/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+						react_jsx_runtime.jsx(CharacterBackdrop, { playId: props.activePlayId, src: background.prefs.enabled ? backgroundSrc : void 0, brightness: background.prefs.brightness, bubbleTransparency: background.prefs.bubbleTransparency, fit: background.prefs.fit, children: /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 							className: TavernView_module_css_default.messages,
 							ref: listRef,
 							onScroll: (event) => {
 								const el = event.currentTarget;
-								pinnedRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+								const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+								scrollPositionRef.current = { top: el.scrollTop, bottom: distanceFromBottom <= 1 };
+								pinnedRef.current = distanceFromBottom < 80;
 							},
 							children: [
 								props.messages.length === 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(Empty, { text: "对话尚未开始。发送第一句话开始这场扮演。" }),
@@ -1472,10 +1951,13 @@ function projectScene(items, characterNames, initialNames, override) {
 								}, message.id)),
 								/* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", { "aria-hidden": "true" })
 							]
-						}),
+						}) }),
 						/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 							className: TavernView_module_css_default.composer,
-							children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+							children: [props.activePlay && react_jsx_runtime.jsx(MemoryDraft, {
+                                play: props.activePlay, characters: props.characters,
+                                busy: running || props.branching || !inPlaySession, onSaved: props.onMemorySaved, onCompact: props.onCompact
+                            }, props.activePlay.id), /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 								className: TavernView_module_css_default.composerRow,
 								children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("textarea", {
 									className: TavernView_module_css_default.composerInput,
@@ -1568,6 +2050,17 @@ function projectScene(items, characterNames, initialNames, override) {
 		}
 		const MessageRow = (0, react.memo)(function MessageRow(props) {
 			const { message } = props;
+			const bubbleRef = react.useRef(null);
+			const [copyStatus, setCopyStatus] = react.useState(null);
+			const copyLabel = copyStatus?.text === message.text ? copyStatus.label : "";
+			const copyMessage = async () => {
+				try {
+					await navigator.clipboard.writeText(richHtml === null ? message.text : bubbleRef.current.innerText);
+					setCopyStatus({ text: message.text, label: "已复制" });
+				} catch {
+					setCopyStatus({ text: message.text, label: "复制失败" });
+				}
+			};
 			const [editing, setEditing] = (0, react.useState)(false);
 			const [draft, setDraft] = (0, react.useState)("");
 			const cls = message.kind === "user" ? `${TavernView_module_css_default.msg} ${TavernView_module_css_default.msgUser}` : message.name === void 0 ? `${TavernView_module_css_default.msg} ${TavernView_module_css_default.msgNarrator}` : TavernView_module_css_default.msg;
@@ -1621,13 +2114,14 @@ function projectScene(items, characterNames, initialNames, override) {
 						})]
 					}) : richHtml !== null ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
 						className: `${TavernView_module_css_default.msgBubble} ${TavernView_module_css_default.msgRich}`,
+						ref: bubbleRef,
 						dangerouslySetInnerHTML: { __html: richHtml }
 					}) : /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
 						className: TavernView_module_css_default.msgBubble,
 						children: message.text
 					})),
 					/* @__PURE__ */ (0, react_jsx_runtime.jsx)(StatusLine, { message }),
-					!editing && (showRetry || canEdit) && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+					!editing && (showRetry || canEdit || message.text !== "") && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 						className: TavernView_module_css_default.msgActions,
 						children: [
 							showSwipe && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
@@ -1679,6 +2173,28 @@ function projectScene(items, characterNames, initialNames, override) {
 								className: `${TavernView_module_css_default.msgStatus} ${TavernView_module_css_default.msgStatusError}`,
 								title: props.swipe.error,
 								children: "✕ 上次重试失败"
+							}),
+							message.text !== "" && react_jsx_runtime.jsx("button", {
+								type: "button",
+								className: TavernView_module_css_default.msgActionBtn + " tv-copy-message",
+								onClick: copyMessage,
+								title: copyLabel || "复制",
+								"aria-label": "复制消息正文",
+								children: [
+									react_jsx_runtime.jsx("svg", {
+										width: 16, height: 16, viewBox: "0 0 24 24",
+										fill: "none", stroke: "currentColor", strokeWidth: 1.7,
+										strokeLinecap: "round", strokeLinejoin: "round", "aria-hidden": true,
+										children: react_jsx_runtime.jsx("path", {
+											d: copyLabel === "已复制" ? "m5 12 4 4L19 6"
+												: copyLabel === "复制失败" ? "M12 5v9 M12 19h.01"
+												: "M8 5a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2 M5 7h10a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2Z"
+										})
+									}),
+									react_jsx_runtime.jsx("span", {
+										className: "tv-copy-status", "aria-live": "polite", children: copyLabel
+									})
+								]
 							})
 						]
 					})
@@ -1690,7 +2206,97 @@ function projectScene(items, characterNames, initialNames, override) {
 		/**
 		* Character library panel: card grid, import (PNG/JSON), editor, export.
 		*/
+
+        // Local library navigation only. Never changes card data, model routes or play references.
+        function libraryName(item, kind) {
+            return kind === "characters" ? item.card?.data?.name || item.id : item.name || item.id;
+        }
+        function libraryCommon(item, used, defaultId) {
+            return used.has(item.id) || item.id === defaultId ||
+                /deepseek api|^deepseek$|^roleplay\s*-|^default$/i.test(item.name || "") &&
+                (!item.model || item.model === "deepseek-flash");
+        }
+        function characterSearchText(item) {
+            const data = item.card?.data ?? item;
+            const list = value => Array.isArray(value) ? value.filter(text => typeof text === "string") : [];
+            return [data.name, item.id, ...list(data.tags), data.description, data.personality,
+                data.scenario, data.first_mes, data.mes_example, ...list(data.alternate_greetings),
+                data.creator_notes, data.system_prompt, data.post_history_instructions]
+                .filter(value => typeof value === "string").join("\n").toLocaleLowerCase();
+        }
+        function libraryItems(items, kind, prefs, query, used, defaultId) {
+            const terms = query.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
+            const favorites = new Set(prefs.favorites || []);
+            const filtered = items.filter(item => {
+                const tags = item.card?.data?.tags || [];
+                const haystack = kind === "characters" ? characterSearchText(item) : [libraryName(item, kind), ...tags, item.model || "", item.provider || "", item.raw?.preset_type || ""].join(" ").toLocaleLowerCase();
+                if (!terms.every(term => haystack.includes(term))) return false;
+                if (prefs.scope === "favorites") return favorites.has(item.id);
+                if (prefs.scope === "used") return used.has(item.id);
+                if (prefs.scope === "common") return libraryCommon(item, used, defaultId);
+                if (prefs.scope?.startsWith("tag:")) return tags.includes(prefs.scope.slice(4));
+                if (prefs.scope === "deepseek") return /deepseek/i.test(haystack);
+                return true;
+            });
+            return filtered.sort((a, b) => {
+                if (prefs.sort === "recent") return String(b.updatedAt || b.createdAt || "").localeCompare(String(a.updatedAt || a.createdAt || "")) || a.id.localeCompare(b.id);
+                if (prefs.sort !== "name") {
+                    const rank = item => favorites.has(item.id) ? 0 : used.has(item.id) ? 1 : item.id === defaultId ? 2 : 3;
+                    if (rank(a) !== rank(b)) return rank(a) - rank(b);
+                }
+                return libraryName(a, kind).localeCompare(libraryName(b, kind), "zh-CN", { numeric: true }) || a.id.localeCompare(b.id);
+            });
+        }
+        function useLibraryBrowser(items, kind, plays, selectedId, defaultId) {
+            const key = "dsh-tavern.library-browser.v1." + kind;
+            const [prefs, setPrefs] = react.useState(() => {
+                const fallback = { scope: kind === "presets" ? "common" : "all", sort: "priority", favorites: [] };
+                try {
+                    const stored = JSON.parse(window.localStorage.getItem(key) || "null");
+                    if (stored && typeof stored === "object") return { ...fallback, ...stored, favorites: Array.isArray(stored.favorites) ? stored.favorites.filter(id => typeof id === "string") : [] };
+                } catch (_) {}
+                return fallback;
+            });
+            const [query, setQuery] = react.useState("");
+            const [storageError, setStorageError] = react.useState(false);
+            const update = patch => {
+                const next = { ...prefs, ...patch };
+                try { window.localStorage.setItem(key, JSON.stringify(next)); setStorageError(false); }
+                catch (_) { setStorageError(true); }
+                setPrefs(next);
+            };
+            const used = new Set((plays || []).flatMap(play => kind === "characters" ? play.characterIds || [] : play.presetId ? [play.presetId] : []));
+            const visible = libraryItems(items, kind, prefs, query, used, defaultId);
+            const scopes = [{value:"all", label:"全部"}, {value:"favorites", label:"我的收藏"}, {value:"used", label:"会话中使用"}];
+            if (kind === "presets") scopes.splice(1, 0, {value:"common",label:"常用预设"}, {value:"deepseek",label:"DeepSeek 相关"});
+            // Tags remain searchable, but are not expanded into a long scope menu.
+            const select = (label, value, onChange, options) => react_jsx_runtime.jsxs("label", {
+                style:{display:"flex",flexDirection:"column",gap:4,flex:1,minWidth:0},
+                children:[react_jsx_runtime.jsx("span",{style:{fontSize:12,opacity:.75},children:label}), react_jsx_runtime.jsx("select",{
+                    "aria-label":label, className:TavernView_module_css_default.fieldSelect,value,onChange:event=>onChange(event.target.value),style:{width:"100%",minWidth:0},
+                    children:options.map(option=>react_jsx_runtime.jsx("option",{value:option.value,children:option.label},option.value))
+                })]
+            });
+            const selected = items.find(item => item.id === selectedId);
+            const isFavorite = prefs.favorites.includes(selectedId);
+            const toolbar = react_jsx_runtime.jsxs("div",{style:{padding:"10px 12px",display:"flex",flexDirection:"column",gap:8,borderBottom:"1px solid #7774",flexShrink:0},children:[
+                react_jsx_runtime.jsx("input",{type:"search","aria-label":kind === "characters" ? "搜索角色名称、标签或设定" : "搜索预设名称或模型",placeholder:kind === "characters" ? "搜索角色名称、标签、设定…" : "搜索预设名称、模型…",className:TavernView_module_css_default.fieldInput,value:query,onChange:event=>setQuery(event.target.value),style:{width:"100%",boxSizing:"border-box"}}),
+                react_jsx_runtime.jsxs("div",{style:{display:"flex",gap:8},children:[
+                    select("显示范围",prefs.scope,value=>update({scope:value}),scopes),
+                    select("列表排序",prefs.sort,value=>update({sort:value}),[{value:"priority",label:"收藏 / 已用优先"},{value:"name",label:"名称顺序"},{value:"recent",label:"最近修改"}])
+                ]}),
+                react_jsx_runtime.jsxs("div",{style:{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8,fontSize:12},children:[
+                    react_jsx_runtime.jsx("span",{children:"显示 "+visible.length+" / "+items.length}),
+                    selected && react_jsx_runtime.jsx("button",{type:"button",className:TavernView_module_css_default.button,"aria-pressed":isFavorite,title:libraryName(selected,kind),onClick:()=>update({favorites:isFavorite ? prefs.favorites.filter(id=>id!==selectedId) : [...prefs.favorites,selectedId]}),children:isFavorite ? "★ 取消收藏" : "☆ 收藏所选"})
+                ]}),
+                storageError && react_jsx_runtime.jsx("span",{role:"status",children:"本次可用，但无法保存列表偏好"})
+            ]});
+            return { visible, toolbar, favorites:new Set(prefs.favorites), used };
+        }
+        // End local library navigation.
+
 		function CharacterPanel(props) {
+            const browser = useLibraryBrowser(props.characters, "characters", props.plays, props.selectedId);
 			const selected = props.characters.find((c) => c.id === props.selectedId) ?? null;
 			const fileRef = (0, react.useRef)(null);
 			const [importing, setImporting] = (0, react.useState)(false);
@@ -1780,7 +2386,8 @@ function projectScene(items, characterNames, initialNames, override) {
 								})
 							]
 						}),
-						showImport && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+						browser.toolbar,
+                        showImport && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 							className: TavernView_module_css_default.section,
 							style: {
 								padding: "8px 10px",
@@ -1814,17 +2421,20 @@ function projectScene(items, characterNames, initialNames, override) {
 						}),
 						/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 							className: TavernView_module_css_default.list,
-							children: [props.characters.length === 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(Empty, { text: "角色库为空" }), props.characters.map((character) => /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("button", {
+							children: [browser.visible.length === 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(Empty, { text: props.characters.length ? "没有匹配角色，试试全部或清空搜索" : "角色库为空" }), browser.visible.map((character) => /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("button", {
 								type: "button",
 								className: `${TavernView_module_css_default.listItem} ${character.id === props.selectedId ? TavernView_module_css_default.listItemActive : ""}`,
 								onClick: () => props.onSelect(character.id),
+                                title: character.card.data.name,
+                                style: { padding: "8px 12px", gap: 10, minHeight: 48 },
 								children: [character.avatar !== void 0 ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("img", {
 									className: TavernView_module_css_default.listItemAvatar,
-									src: avatarSrc(character.avatar),
+									style: { width: 32, height: 32, flexShrink: 0 },
+                                    src: avatarSrc(character.avatar),
 									alt: ""
 								}) : /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", { className: TavernView_module_css_default.listItemAvatar }), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
 									className: TavernView_module_css_default.listItemName,
-									children: character.card.data.name
+									children: (browser.favorites.has(character.id) ? "★ " : browser.used.has(character.id) ? "● " : "") + character.card.data.name
 								})]
 							}, character.id))]
 						})
@@ -1841,6 +2451,37 @@ function projectScene(items, characterNames, initialNames, override) {
 				})]
 			});
 		}
+        function CharacterAvatarPreview({ src, name }) {
+            const [open, setOpen] = react.useState(false);
+            const [broken, setBroken] = react.useState(false);
+            const dialogRef = react.useRef(null);
+            react.useEffect(() => {
+                const dialog = dialogRef.current;
+                if (!dialog) return;
+                if (open && !dialog.open) dialog.showModal();
+                else if (!open && dialog.open) dialog.close();
+            }, [open]);
+            return react_jsx_runtime.jsxs(react_jsx_runtime.Fragment, { children: [
+                react_jsx_runtime.jsx("button", { type: "button", className: "tv-avatar-preview-trigger",
+                    title: "点击查看完整头像", "aria-label": `放大${name}的头像`,
+                    onClick: () => { setBroken(false); setOpen(true); },
+                    children: react_jsx_runtime.jsx("img", { className: TavernView_module_css_default.cardAvatar,
+                        src: avatarSrc(src), alt: name }) }),
+                react_jsx_runtime.jsxs("dialog", { ref: dialogRef, className: "tv-avatar-preview-dialog",
+                    "aria-label": `${name}的完整头像`, onClose: () => setOpen(false),
+                    onCancel: () => setOpen(false),
+                    onClick: event => { if (event.target === event.currentTarget) setOpen(false); },
+                    children: [react_jsx_runtime.jsxs("div", { className: "tv-avatar-preview-head", children: [
+                        react_jsx_runtime.jsx("span", { children: name }),
+                        react_jsx_runtime.jsx("button", { type: "button", className: TavernView_module_css_default.btn,
+                            autoFocus: true, "aria-label": "关闭头像预览", onClick: () => setOpen(false), children: "关闭 ×" })
+                    ] }), open && (broken ? react_jsx_runtime.jsx("p", { role: "status", children: "头像暂时无法加载，请关闭后重试。" }) :
+                        react_jsx_runtime.jsx("img", { className: "tv-avatar-preview-image", src: avatarSrc(src),
+                            alt: `${name}的完整头像`, onError: () => setBroken(true) }))]
+                })
+            ] });
+        }
+
 		function CharacterEditor(props) {
 			const data = props.character.card.data;
 			const [name, setName] = (0, react.useState)(data.name);
@@ -1891,11 +2532,9 @@ function projectScene(items, characterNames, initialNames, override) {
 						children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 							className: TavernView_module_css_default.row,
 							children: [
-								props.character.avatar !== void 0 ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("img", {
-									className: TavernView_module_css_default.cardAvatar,
-									src: avatarSrc(props.character.avatar),
-									alt: ""
-								}) : /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", { className: TavernView_module_css_default.cardAvatar }),
+								props.character.avatar !== void 0 ? react_jsx_runtime.jsx(CharacterAvatarPreview, {
+                                    src: props.character.avatar, name: data.name
+                                }, props.character.id) : /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", { className: TavernView_module_css_default.cardAvatar }),
 								/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
 									className: TavernView_module_css_default.sectionTitle,
 									style: {
@@ -2338,6 +2977,7 @@ function projectScene(items, characterNames, initialNames, override) {
 		* Preset panel: preset list, sampler editor, import/export.
 		*/
 		function PresetPanel(props) {
+            const browser = useLibraryBrowser(props.presets, "presets", props.plays, props.selectedId, props.defaultPresetId);
 			const selected = props.presets.find((preset) => preset.id === props.selectedId) ?? null;
 			const [importText, setImportText] = (0, react.useState)("");
 			const [newName, setNewName] = (0, react.useState)("");
@@ -2380,15 +3020,16 @@ function projectScene(items, characterNames, initialNames, override) {
 								"）"
 							]
 						})
-					}), /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+					}), browser.toolbar, /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 						className: TavernView_module_css_default.list,
-						children: [props.presets.length === 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(Empty, { text: "还没有预设" }), props.presets.map((preset) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+						children: [browser.visible.length === 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(Empty, { text: props.presets.length ? "没有匹配预设，试试全部或清空搜索" : "还没有预设" }), browser.visible.map((preset) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
 							type: "button",
 							className: `${TavernView_module_css_default.listItem} ${preset.id === props.selectedId ? TavernView_module_css_default.listItemActive : ""}`,
 							onClick: () => props.onSelect(preset.id),
+                            title: [preset.name, preset.model, preset.provider].filter(Boolean).join(" · "),
 							children: /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
 								className: TavernView_module_css_default.listItemName,
-								children: [preset.name, preset.id === props.defaultPresetId ? " ★" : ""]
+								children: [(browser.favorites.has(preset.id) ? "★ " : browser.used.has(preset.id) ? "● " : ""), preset.name, preset.id === props.defaultPresetId ? "（默认）" : ""]
 							})
 						}, preset.id))]
 					})]
@@ -2465,6 +3106,42 @@ function projectScene(items, characterNames, initialNames, override) {
 			const value = Number(text);
 			return Number.isFinite(value) ? value : void 0;
 		}
+		function extractClientPresetPrompts(preset) {
+			const raw = preset?.raw;
+			if (!raw || !Array.isArray(raw.prompts)) return [];
+			const byId = new Map();
+			for (const item of raw.prompts) {
+				if (item && typeof item.identifier === "string" && item.identifier !== "") byId.set(item.identifier, item);
+			}
+			const orders = Array.isArray(raw.prompt_order) ? raw.prompt_order : [];
+			const orderGroup = orders.find((entry) => entry && entry.character_id === 100001) ?? orders[orders.length - 1] ?? orders[0];
+			const orderList = Array.isArray(orderGroup?.order) ? orderGroup.order : [];
+			const seen = new Set();
+			const result = [];
+			const pushItem = (prompt, enabledOverride) => {
+				if (!prompt || typeof prompt.identifier !== "string") return;
+				seen.add(prompt.identifier);
+				result.push({
+					identifier: prompt.identifier,
+					name: typeof prompt.name === "string" && prompt.name !== "" ? prompt.name : prompt.identifier,
+					role: typeof prompt.role === "string" && prompt.role !== "" ? prompt.role : "system",
+					content: typeof prompt.content === "string" ? prompt.content : "",
+					enabled: typeof enabledOverride === "boolean" ? enabledOverride : Boolean(prompt.enabled ?? true),
+					marker: Boolean(prompt.marker),
+					injectionPosition: typeof prompt.injection_position === "number" ? prompt.injection_position : 0,
+					injectionDepth: typeof prompt.injection_depth === "number" ? prompt.injection_depth : 4
+				});
+			};
+			for (const orderItem of orderList) {
+				if (!orderItem || typeof orderItem.identifier !== "string") continue;
+				const prompt = byId.get(orderItem.identifier);
+				if (prompt !== void 0) pushItem(prompt, orderItem.enabled);
+			}
+			for (const prompt of raw.prompts) {
+				if (prompt && typeof prompt.identifier === "string" && !seen.has(prompt.identifier)) pushItem(prompt, prompt.enabled ?? false);
+			}
+			return result;
+		}
 		function PresetEditor(props) {
 			const preset = props.preset;
 			const [name, setName] = (0, react.useState)(preset.name);
@@ -2483,10 +3160,27 @@ function projectScene(items, characterNames, initialNames, override) {
 			const [presencePenalty, setPresencePenalty] = (0, react.useState)(numberField(preset.presencePenalty));
 			const [frequencyPenalty, setFrequencyPenalty] = (0, react.useState)(numberField(preset.frequencyPenalty));
 			const [systemPrompt, setSystemPrompt] = (0, react.useState)(preset.systemPrompt ?? "");
+			const [promptEntries, setPromptEntries] = (0, react.useState)(() => extractClientPresetPrompts(preset));
+			const [dirtyIds, setDirtyIds] = (0, react.useState)(() => new Set());
+			const [promptQuery, setPromptQuery] = (0, react.useState)("");
+			const [promptFilter, setPromptFilter] = (0, react.useState)("all");
+			const [expandedId, setExpandedId] = (0, react.useState)(null);
 			const [saving, setSaving] = (0, react.useState)(false);
+			const updatePromptEntry = (identifier, patch) => {
+				setPromptEntries((prev) => prev.map((item) => item.identifier === identifier ? { ...item, ...patch } : item));
+				setDirtyIds((prev) => new Set([...prev, identifier]));
+			};
 			const save = async () => {
 				setSaving(true);
 				try {
+					const promptUpdates = dirtyIds.size > 0
+						? promptEntries.filter((item) => dirtyIds.has(item.identifier)).map((item) => ({
+							identifier: item.identifier,
+							enabled: item.enabled,
+							content: item.content,
+							role: item.role
+						}))
+						: void 0;
 					await props.api.updatePreset(preset.id, {
 						name: name.trim() || preset.name,
 						model: model.trim() === "" ? null : model.trim(),
@@ -2503,8 +3197,10 @@ function projectScene(items, characterNames, initialNames, override) {
 						repPenSlope: parseNumber(repPenSlope),
 						presencePenalty: parseNumber(presencePenalty),
 						frequencyPenalty: parseNumber(frequencyPenalty),
-						systemPrompt
+						systemPrompt,
+						...(promptUpdates !== void 0 ? { promptUpdates } : {})
 					});
+					setDirtyIds(new Set());
 					await props.onChanged();
 				} catch (error) {
 					props.onError(error instanceof Error ? error.message : String(error));
@@ -2562,19 +3258,19 @@ function projectScene(items, characterNames, initialNames, override) {
 								})
 							}),
 							/* @__PURE__ */ (0, react_jsx_runtime.jsx)(Field, {
-								label: "模型（custom_model）",
+								label: "默认模型（可选兜底）",
 								children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(TextInput, {
 									value: model,
 									onChange: setModel,
-									placeholder: "例如 deepseek-chat"
+									placeholder: "留空则由会话决定"
 								})
 							}),
 							/* @__PURE__ */ (0, react_jsx_runtime.jsx)(Field, {
-								label: "Provider（DSH 路由）",
+								label: "默认 Provider（可选兜底）",
 								children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(TextInput, {
 									value: provider,
 									onChange: setProvider,
-									placeholder: "留空用默认"
+									placeholder: "留空则由会话决定"
 								})
 							})
 						]
@@ -2695,7 +3391,7 @@ function projectScene(items, characterNames, initialNames, override) {
 						]
 					}),
 					/* @__PURE__ */ (0, react_jsx_runtime.jsx)(Field, {
-						label: "系统提示覆盖（叠加在角色卡之上）",
+						label: "系统提示覆盖（叠加在预设条目与角色卡之上）",
 						children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(TextArea, {
 							value: systemPrompt,
 							onChange: setSystemPrompt,
@@ -2708,9 +3404,124 @@ function projectScene(items, characterNames, initialNames, override) {
 							variant: "primary",
 							disabled: saving,
 							onClick: () => void save(),
-							children: saving ? "保存中…" : "保存预设"
+							children: saving ? "保存中…" : dirtyIds.size > 0 ? `保存预设（${dirtyIds.size} 项条目改动）` : "保存预设"
 						})
-					})
+					}),
+					promptEntries.length > 0 && (() => {
+						const q = promptQuery.trim().toLowerCase();
+						const enabledCount = promptEntries.filter((x) => x.enabled).length;
+						const filteredPrompts = promptEntries.filter((item) => {
+							if (promptFilter === "enabled" && !item.enabled) return false;
+							if (promptFilter === "disabled" && item.enabled) return false;
+							if (q !== "" && !item.name.toLowerCase().includes(q) && !item.content.toLowerCase().includes(q)) return false;
+							return true;
+						});
+						return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+							className: TavernView_module_css_default.section,
+							style: { marginTop: 12 },
+							children: [
+								/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+									className: TavernView_module_css_default.row,
+									style: { justifyContent: "space-between", alignItems: "center" },
+									children: [
+										/* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+											className: TavernView_module_css_default.sectionTitle,
+											children: `预设条目（已启用 ${enabledCount} / ${promptEntries.length}）`
+										}),
+										/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+											className: TavernView_module_css_default.row,
+											children: [
+												/* @__PURE__ */ (0, react_jsx_runtime.jsx)("input", {
+													className: TavernView_module_css_default.castSearch,
+													value: promptQuery,
+													placeholder: "搜索条目名称或内容…",
+													onChange: (event) => setPromptQuery(event.target.value)
+												}),
+												/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("select", {
+													className: TavernView_module_css_default.fieldSelect,
+													style: { width: "auto" },
+													value: promptFilter,
+													onChange: (event) => setPromptFilter(event.target.value),
+													children: [
+														/* @__PURE__ */ (0, react_jsx_runtime.jsx)("option", { value: "all", children: "全部" }),
+														/* @__PURE__ */ (0, react_jsx_runtime.jsx)("option", { value: "enabled", children: "已启用" }),
+														/* @__PURE__ */ (0, react_jsx_runtime.jsx)("option", { value: "disabled", children: "已禁用" })
+													]
+												})
+											]
+										})
+									]
+								}),
+								/* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+									className: TavernView_module_css_default.entryList,
+									children: filteredPrompts.map((item) => {
+										const isOpen = expandedId === item.identifier;
+										return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+											className: TavernView_module_css_default.entry,
+											style: { opacity: item.enabled ? 1 : 0.65 },
+											children: [
+												/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+													className: TavernView_module_css_default.entryHead,
+													children: [
+														/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("label", {
+															className: TavernView_module_css_default.checkRow,
+															style: { flex: 1, minWidth: 0 },
+															children: [
+																/* @__PURE__ */ (0, react_jsx_runtime.jsx)("input", {
+																	type: "checkbox",
+																	checked: item.enabled,
+																	onChange: (event) => updatePromptEntry(item.identifier, { enabled: event.target.checked })
+																}),
+																/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+																	style: { fontWeight: item.enabled ? 600 : 400, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+																	children: item.name
+																})
+															]
+														}),
+														/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+															className: TavernView_module_css_default.row,
+															style: { gap: 6 },
+															children: [
+																item.marker && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", { className: TavernView_module_css_default.badge, children: "槽位" }),
+																!item.marker && item.role !== "system" && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", { className: TavernView_module_css_default.badge, children: item.role }),
+																item.injectionPosition === 1 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", { className: TavernView_module_css_default.badge, children: `@D${item.injectionDepth}` }),
+																!item.marker && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(Button, {
+																	variant: "ghost",
+																	onClick: () => setExpandedId(isOpen ? null : item.identifier),
+																	children: isOpen ? "收起" : "编辑"
+																})
+															]
+														})
+													]
+												}),
+												isOpen && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+													style: { display: "flex", flexDirection: "column", gap: 6, marginTop: 6 },
+													children: [
+														/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("select", {
+															className: TavernView_module_css_default.fieldSelect,
+															style: { width: "auto", alignSelf: "flex-start" },
+															value: item.role,
+															onChange: (event) => updatePromptEntry(item.identifier, { role: event.target.value }),
+															children: [
+																/* @__PURE__ */ (0, react_jsx_runtime.jsx)("option", { value: "system", children: "System" }),
+																/* @__PURE__ */ (0, react_jsx_runtime.jsx)("option", { value: "assistant", children: "Assistant" }),
+																/* @__PURE__ */ (0, react_jsx_runtime.jsx)("option", { value: "user", children: "User" })
+															]
+														}),
+														/* @__PURE__ */ (0, react_jsx_runtime.jsx)(TextArea, {
+															value: item.content,
+															onChange: (val) => updatePromptEntry(item.identifier, { content: val }),
+															rows: 6
+														})
+													]
+												})
+											]
+										}, item.identifier);
+									})
+								})
+							]
+						});
+					})()
 				]
 			});
 		}
@@ -3033,7 +3844,7 @@ function projectScene(items, characterNames, initialNames, override) {
 			const [notice, setNotice] = (0, react.useState)("");
 			const busy = saving || props.running;
 			const updateEntry = (index, patch) => setEntries(previous => previous.map((entry, i) => i === index ? { ...entry, ...patch } : entry));
-			const save = async () => {
+			const save = async (requestReview = false) => {
 				if (busy) return;
 				if (memory?.suspended && !confirmAction("这份经历来自其他剧情分支。确认已经核对，重新用于当前分支？")) return;
 				setSaving(true);
@@ -3044,11 +3855,12 @@ function projectScene(items, characterNames, initialNames, override) {
 						book: { ...memory?.book, entries },
                         autoReview: { enabled: autoEnabled, interval: Number(interval) },
                         dismissAutomaticIds,
+                        requestReview: requestReview === true,
 						enabled,
 						expectedUpdatedAt: props.play.updatedAt
 					});
 					await props.onChanged();
-					setNotice("经历已保存，从下一轮生效。");
+					setNotice(requestReview === true ? "已安排从头分批重查，将随下一次正常回复开始，不单独调用模型。" : "经历已保存，从下一轮生效。");
 				} catch (error) {
 					props.onError(error instanceof Error ? error.message : String(error));
 				} finally { setSaving(false); }
@@ -3064,14 +3876,26 @@ function projectScene(items, characterNames, initialNames, override) {
                     (0, react_jsx_runtime.jsx)(Field, { label: "检查间隔（2–50 轮，一问一答算一轮）", children: (0, react_jsx_runtime.jsx)(TextInput, { value: interval, onChange: setInterval }) }),
                     (0, react_jsx_runtime.jsx)("p", { children: "每达到间隔，在下一次正常回复时检查此前已完成的对话；没有新事实就不添加。不单独发起生成请求，工具交互仍消耗令牌。自动经历与手动条目分开，保存后生效。" }),
                     memory?.autoReview?.checkedAt && (0, react_jsx_runtime.jsx)("p", { children: "最近检查：" + memory.autoReview.checkedAt + "，新增 " + (memory.autoReview.lastAdded ?? 0) + " 条。" }),
-                    ...(memory?.automaticEntries ?? []).filter(entry => !entry.disable && !dismissAutomaticIds.includes(entry.uid)).map(entry => (0, react_jsx_runtime.jsxs)("details", { children: [
-                        (0, react_jsx_runtime.jsx)("summary", { children: entry.comment }),
+                    memory?.autoReview?.requested && (0, react_jsx_runtime.jsx)("p", { role: "status", children: "已安排重查，将随下一次正常回复开始。" }),
+                    memory?.autoReview?.lastReason && (0, react_jsx_runtime.jsx)("p", { children: "未新增原因：" + memory.autoReview.lastReason }),
+                    (0, react_jsx_runtime.jsx)(Button, { disabled: busy || !enabled || !autoEnabled, onClick: () => save(true), children: "重新检查已完成对话（随下次回复）" }),
+                    ...projectAutomaticMemory(memory ?? {}).filter(entry => !dismissAutomaticIds.includes(entry.uid)).map(entry => (0, react_jsx_runtime.jsxs)("details", { children: [
+                        (0, react_jsx_runtime.jsx)("summary", { children: (entry.kind === "state" ? "当前状态 · " : "按需经历 · ") + entry.comment }),
                         (0, react_jsx_runtime.jsx)("p", { children: entry.content }),
-                        (0, react_jsx_runtime.jsx)("blockquote", { children: "来源原文：" + entry.evidence.quote }),
+                        (0, react_jsx_runtime.jsx)("blockquote", { children: "来源原文：" + (entry.evidence?.quote ?? "见保留的原始记录与来源编号") }),
                         (0, react_jsx_runtime.jsx)(Button, { children: "撤回此条（保存后生效）", onClick: () => setDismissAutomaticIds(previous => [...previous, entry.uid]) })
                     ] }, entry.uid)),
 
-					(0, react_jsx_runtime.jsx)("p", { children: "共 " + entries.length + " 条。常驻条目每轮提供，其余按关键词触发，与世界书共享预算。" }),
+                    memory?.curation && (0, react_jsx_runtime.jsxs)("details", {children:[
+                        (0, react_jsx_runtime.jsx)("summary", {children:"原始自动记录 · " + (memory.automaticEntries ?? []).length + " 条（完整保留，不重复注入）"}),
+                        ...(memory.automaticEntries ?? []).map(entry => (0, react_jsx_runtime.jsxs)("details", {children:[
+                            (0, react_jsx_runtime.jsx)("summary", {children:entry.comment}),
+                            (0, react_jsx_runtime.jsx)("p", {children:entry.content}),
+                            (0, react_jsx_runtime.jsx)("blockquote", {children:entry.evidence?.quote})
+                        ]}, entry.uid))
+                    ]}),
+
+					(0, react_jsx_runtime.jsx)("p", { children: "手动 " + entries.length + " 条，自动 " + projectAutomaticMemory(memory ?? {}).filter(entry => !dismissAutomaticIds.includes(entry.uid)).length + " 条有效（最多3条关键状态常驻，其余按关键词触发）。常驻条目每轮提供，其余按关键词触发，与世界书共享预算。" }),
 					entries.length === 0 && (0, react_jsx_runtime.jsxs)("div", { children: [
 						(0, react_jsx_runtime.jsx)(Select, { value: sourceId, onChange: setSourceId, placeholder: "选择作为经历素材的世界书", options: props.lorebooks.map(book => ({ value: book.id, label: book.name })) }),
 						(0, react_jsx_runtime.jsx)(Button, {
@@ -3154,15 +3978,19 @@ function projectScene(items, characterNames, initialNames, override) {
                     if (request === activationRequest.current) actions.setError(error instanceof Error ? error.message : String(error));
                 }
             }, [actions, state]);
-			const createPlay = (0, react.useCallback)(async (title, characterIds, lorebookIds, presetId, narratorEnabled, multiAgent) => {
+			const createPlay = (0, react.useCallback)(async (title, characterIds, lorebookIds, presetId, narratorEnabled, multiAgent, greetingIndex, modelConfig) => {
 				try {
 					const created = await tavernApi.createPlay({
 						title,
 						characterIds,
 						lorebookIds,
 						presetId,
+						...(modelConfig?.provider ? { provider: modelConfig.provider } : {}),
+						...(modelConfig?.model ? { model: modelConfig.model } : {}),
+						...(modelConfig?.maxTokens ? { maxTokens: modelConfig.maxTokens } : {}),
 						narratorEnabled,
-						multiAgent
+						multiAgent,
+						greetingIndex
 					});
 					await refresh();
 					actions.setPlayId(created.id);
@@ -3482,8 +4310,11 @@ function projectScene(items, characterNames, initialNames, override) {
 							})),
 							presets: state.presets.map((p) => ({
 								id: p.id,
-								name: p.name
+								name: p.name,
+								provider: p.provider,
+								model: p.model
 							})),
+							defaultModel: state.defaultModel,
 							activePlayId: playId,
 							activePlayTitle: activePlay?.title,
 							sceneCharacterIds: sceneIdsFor(sceneProjection.presentNames),
@@ -3508,6 +4339,7 @@ function projectScene(items, characterNames, initialNames, override) {
 							onGoToLorebooks: () => actions.setPanel("lorebooks"),
 							onCreatePlay: createPlay,
                             onCompact: compactContext,
+                            onMemorySaved: refresh,
                             compactNotice,
 							onDeletePlay: deletePlay,
 							onSend: async (text) => {
@@ -3515,7 +4347,8 @@ function projectScene(items, characterNames, initialNames, override) {
 								try {
 									if (activePlay === null || activeHandle === void 0) throw new Error("请先选择一个酒馆会话");
 									setAdvancedFrom(replyKey);
-									await activeHandle.send(text);
+									if (activePlay.groupReply && activePlay.characterIds.length > 1) await tavernApi.sendGroupMessage(activePlay.id, text);
+                                    else await activeHandle.send(text);
 								} catch (e) {
 									setAdvancedFrom(current => current === replyKey ? void 0 : current);
 									actions.setError(e instanceof Error ? e.message : String(e));
@@ -3533,6 +4366,7 @@ function projectScene(items, characterNames, initialNames, override) {
 							onError: actions.setError
 						}),
 						panel === "characters" && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(CharacterPanel, {
+                            plays: state.plays,
 							api: tavernApi,
 							characters: state.characters,
 							selectedId: selectedCharacterId,
@@ -3549,6 +4383,7 @@ function projectScene(items, characterNames, initialNames, override) {
 							onError: actions.setError
 						}),
 						panel === "presets" && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(PresetPanel, {
+                            plays: state.plays,
 							api: tavernApi,
 							presets: state.presets,
 							selectedId: selectedPresetId,

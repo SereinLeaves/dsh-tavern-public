@@ -2,7 +2,7 @@ const fs=require('node:fs'),assert=require('node:assert/strict');
 const code=fs.readFileSync(__dirname+'/../dist/dsh-tavern/lib/client.js','utf8');
 const start=code.indexOf('const MessageRow = '),end=code.indexOf('\n\t\t//#endregion',start);
 let hooks=[],cursor=0;
-const react={memo:fn=>fn,useState(initial){const i=cursor++;if(!(i in hooks))hooks[i]=initial;return[hooks[i],value=>hooks[i]=typeof value==='function'?value(hooks[i]):value]},useMemo:fn=>fn(),useCallback:fn=>fn};
+const react={memo:fn=>fn,useState(initial){const i=cursor++;if(!(i in hooks))hooks[i]=initial;return[hooks[i],value=>hooks[i]=typeof value==='function'?value(hooks[i]):value]},useMemo:fn=>fn(),useCallback:fn=>fn,useRef:value=>({current:value})};
 const jsx=(type,props)=>({type,props});
 const dummy=()=>{};
 const Row=Function('react','react_jsx_runtime','TavernView_module_css_default','sameMessageRow','looksLikeHtml','sanitizeMessageHtml','Button','Spinner','ThinkingBlock','CharacterAvatar','StatusLine',code.slice(start,end)+'\nreturn MessageRow')(

@@ -1,0 +1,70 @@
+const fs = require('node:fs'), vm = require('node:vm'), assert = require('node:assert/strict');
+const source = fs.readFileSync(process.argv[2] || __dirname + '/../dist/dsh-tavern/lib/client.js', 'utf8');
+const start = source.indexOf('const CHARACTER_BACKGROUND_KEY ='), end = source.indexOf('// End character background.', start);
+let hooks = [], cursor = 0;
+const react = {useState(initial) {const i=cursor++;if(!(i in hooks))hooks[i]=typeof initial==='function'?initial():initial;return [hooks[i],v=>hooks[i]=typeof v==='function'?v(hooks[i]):v];},useEffect(){},cloneElement(el, extra){return extra&&Object.keys(extra).length?{...el,props:{...el.props,...extra}}:el;}};
+const jsx = (type, props, key) => ({type,props,key});
+let stored = null, denied = false;
+const window = {localStorage:{getItem(){if(denied)throw Error('denied');return stored;},setItem(k,v){if(denied)throw Error('denied');stored=v;}}};
+const {normalizeCharacterBackground:normalize,singleCharacterBackground:resolve,useCharacterBackground:use,CharacterBackdrop:Backdrop,CharacterBackgroundControls:Controls} = vm.runInNewContext(source.slice(start,end)+'\n({normalizeCharacterBackground,singleCharacterBackground,useCharacterBackground,CharacterBackdrop,CharacterBackgroundControls})', {react,react_jsx_runtime:{jsx,jsxs:jsx},TavernView_module_css_default:{styleSelect:'styleSelect'},window,avatarSrc:avatar=>!avatar?undefined:avatar.startsWith('/')?avatar:'/tavern/avatars/'+encodeURIComponent(avatar)});
+const render = fn => {cursor=0;return fn();};
+const walk = node => node && typeof node === 'object' ? [node,...[node.props?.children].flat(Infinity).flatMap(walk)] : [];
+const chars = [{id:'a',avatar:'a.png'},{id:'b',avatar:'b.png'},{id:'missing'}];
+assert.equal(resolve({characterIds:['a']},chars),'/tavern/avatars/a.png');
+assert.equal(resolve({characterIds:['b']},chars),'/tavern/avatars/b.png');
+for(const play of [null,{characterIds:[]},{characterIds:['deleted']},{characterIds:['missing']}])assert.equal(resolve(play,chars),undefined);
+assert.equal(resolve({characterIds:['a','b']},chars,['b']),'/tavern/avatars/b.png');
+assert.equal(resolve({characterIds:['a','b']},chars,['a']),'/tavern/avatars/a.png');
+assert.equal(resolve({characterIds:['a','b']},chars,['a','b']),'/tavern/avatars/b.png');
+assert.equal(resolve({characterIds:['a','b']},chars,[]),undefined);
+assert.equal(resolve({characterIds:['a','b']},chars,['stale']),undefined);
+assert.equal(resolve({characterIds:['a','b']},chars,undefined,['b']),'/tavern/avatars/b.png');
+assert.equal(resolve({characterIds:['a','b']},chars),'/tavern/avatars/a.png');
+let prefs=render(use);assert.equal(prefs.prefs.enabled,true);assert.equal(prefs.prefs.brightness,30);
+prefs.update({enabled:false,brightness:65});hooks=[];prefs=render(use);assert.equal(prefs.prefs.enabled,false);assert.equal(prefs.prefs.brightness,65);
+const controls=Controls(prefs);assert.equal(walk(controls).find(n=>n.props?.type==='range').props.disabled,true);
+denied=true;prefs.update({enabled:true});prefs=render(use);assert.equal(prefs.prefs.enabled,true);assert.equal(prefs.storageError,true);
+hooks=[];prefs=render(use);assert.equal(prefs.prefs.brightness,30);denied=false;
+for(const value of ['bad','null','{}','{"enabled":"false","brightness":"bad"}']){stored=value;hooks=[];prefs=render(use);assert.equal(prefs.prefs.brightness,30);assert.equal(prefs.prefs.enabled,true);}
+assert.equal(normalize({brightness:999}).brightness,70);assert.equal(normalize({brightness:-1}).brightness,10);assert.equal(normalize({brightness:NaN}).brightness,30);
+hooks=[];let src='/a.png';const child=jsx('messages',{});let node=render(()=>Backdrop({src,brightness:30,children:child}));
+assert(!node.props.className.includes('tv-has'));assert(walk(node).includes(child));
+walk(node).find(n=>n.type==='img').props.onLoad();node=render(()=>Backdrop({src,brightness:30,children:child}));assert(node.props.className.includes('tv-has'));assert.equal(walk(node).find(n=>n.props?.className==='tv-character-shade').props.style.opacity,.7);
+src='/b.png';node=render(()=>Backdrop({src,brightness:70,children:child}));assert(!node.props.className.includes('tv-has'),'old image never leaks into new play');
+walk(node).find(n=>n.type==='img').props.onError();node=render(()=>Backdrop({src,brightness:70,children:child}));assert(!node.props.className.includes('tv-has'),'broken image falls back');
+src=undefined;node=render(()=>Backdrop({src,brightness:30,children:child}));assert(!walk(node).some(n=>n.type==='img'));assert(!walk(node).some(n=>n.props?.className==='tv-character-shade'));
+// Bubble transparency: persistence, independent controls and CSS endpoints.
+assert.equal(normalize(null).bubbleTransparency,50);
+assert.equal(normalize({bubbleTransparency:-10}).bubbleTransparency,0);
+assert.equal(normalize({bubbleTransparency:120}).bubbleTransparency,100);
+assert.equal(normalize({bubbleTransparency:NaN}).bubbleTransparency,50);
+assert.equal(normalize({bubbleTransparency:"60"}).bubbleTransparency,50);
+stored='{"enabled":true,"brightness":31}';hooks=[];prefs=render(use);
+assert.equal(prefs.prefs.bubbleTransparency,50);assert.equal(prefs.prefs.brightness,31);
+let transparencyControl=walk(Controls(prefs)).find(n=>n.props?.['aria-label']==='文字底色透明度');
+transparencyControl.props.onChange({target:{value:'100'}});hooks=[];prefs=render(use);
+assert.equal(prefs.prefs.bubbleTransparency,100);assert.equal(prefs.prefs.brightness,31);
+for(const percent of [0,50,100]) {hooks=[];node=render(()=>Backdrop({src:'/fixture.png',brightness:30,bubbleTransparency:percent,children:child}));assert.equal(node.props.style['--tv-bubble-opacity'],`${100-percent}%`);}
+assert(source.includes('var(--tv-bubble-user) var(--tv-bubble-opacity,50%),transparent'));
+assert.equal((source.match(/var\(--tv-surface-card\) var\(--tv-bubble-opacity,50%\),transparent/g)||[]).length,2);
+// Fitting migration, persistence and controls remain independent from image quality.
+assert.equal(normalize(null).fit,'contain');
+assert.equal(normalize({fit:'cover'}).fit,'cover');
+assert.equal(normalize({fit:'garbage'}).fit,'contain');
+stored='{"enabled":true,"brightness":70,"bubbleTransparency":37}';hooks=[];prefs=render(use);
+assert.equal(prefs.prefs.fit,'contain');assert.equal(prefs.prefs.brightness,70);assert.equal(prefs.prefs.bubbleTransparency,37);
+let fitControl=walk(Controls(prefs)).find(n=>n.props?.['aria-label']==='背景适配');
+assert.equal(fitControl.props.value,'contain');fitControl.props.onChange({target:{value:'cover'}});
+hooks=[];prefs=render(use);assert.equal(prefs.prefs.fit,'cover');assert.equal(prefs.prefs.brightness,70);assert.equal(prefs.prefs.bubbleTransparency,37);
+prefs.update({enabled:false});prefs=render(use);assert(walk(Controls(prefs)).find(n=>n.props?.['aria-label']==='背景适配').props.disabled);
+for(const mode of ['contain','cover']){hooks=[];node=render(()=>Backdrop({src:'/portrait.png',brightness:70,fit:mode,children:child}));assert.equal(walk(node).find(n=>n.type==='img').props.style.objectFit,mode);}
+const backdropCss=source.match(/\.tv-character-backdrop\{([^}]+)}/)[1];
+assert(backdropCss.includes('object-fit:contain'));assert(!backdropCss.includes('filter:'));assert(!backdropCss.includes('transform:'));
+// Exercise the actual ChatPanel integration and controls with fictional props.
+const a=source.indexOf('function ChatPanel(props)'),b=source.indexOf('/** Collapsible reasoning',a);
+const panelReact={...react,useEffect(){},useLayoutEffect(){},useRef:value=>({current:value}),useMemo:fn=>fn(),useCallback:fn=>fn};
+const Panel=vm.runInNewContext(source.slice(a,b)+'\nChatPanel',{react:panelReact,react_jsx_runtime:{jsx,jsxs:jsx},useCharacterBackground:()=>({prefs:{enabled:true,brightness:30,fit:'cover'}}),singleCharacterBackground:resolve,CharacterBackgroundControls:Controls,CharacterBackdrop:Backdrop,TavernView_module_css_default:new Proxy({},{get:(_,k)=>k}),Button:'Button',Spinner:'Spinner',SceneRail:'SceneRail',SceneCharacterRail:'SceneCharacterRail',CharacterAvatar:'CharacterAvatar',FullscreenButton:'FullscreenButton',MemoryDraft:'MemoryDraft',MessageRow:'MessageRow',Empty:'Empty',avatarSrc:x=>x});
+const props={characters:chars,plays:[],lorebooks:[],presets:[],messages:[],activePlay:{characterIds:['a']},activePlayId:'one',activeSessionId:'session'};
+hooks=[];node=render(()=>Panel(props));assert.equal(walk(node).find(n=>n.type===Backdrop).props.src,'/tavern/avatars/a.png');assert(walk(node).some(n=>n.type===Controls));assert.equal(walk(node).find(n=>n.type===Backdrop).props.fit,'cover');
+props.activePlay={characterIds:['a','b']};props.activeCharacterIds=['b'];node=render(()=>Panel(props));assert.equal(walk(node).find(n=>n.type===Backdrop).props.src,'/tavern/avatars/b.png');assert(walk(node).some(n=>n.type===Controls));
+console.log('PASS character background: single/multiple/missing roles, play switch, preference reload, corrupt/blocked storage, brightness bounds, fit migration/persistence, disabled control, loading/error fallback, ChatPanel integration.');

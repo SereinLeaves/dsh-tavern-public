@@ -41,12 +41,13 @@ try {
  assert.equal(saved.characterMemories['role-a'].book.entries.length,1);
  assert.equal(saved.characterMemories['role-a'].automaticEntries.length,1);
  const roleContext=rt.buildLoreContext(saved,{wrap:text=>text},'role-a');
- assert.ok(roleContext.text({agent:{session:{snapshotEvents:()=>[]}}}).includes(candidate.content));
+ assert.ok(!roleContext.text({agent:{session:{snapshotEvents:()=>[]}}}).includes(candidate.content));
+ assert.ok(roleContext.text({agent}).includes(candidate.content));
  await assert.rejects(tool.execute({characterId:'role-a',entries:[]},{agent}));
  // Finish turn 6 and complete five further successful rounds.
  events.push({type:'turn/end',data:{turn:6,reason:{kind:'completed'}}});
  for(let n=7;n<=10;n++)turn(n);
- assert.deepEqual(await tool.execute({characterId:'role-a',entries:[]},{agent}),{added:0});
+ assert.deepEqual(await tool.execute({characterId:'role-a',entries:[],noChangeReason:'对话只是重复已有图书馆约定，没有新增事实或状态变化。'},{agent}),{added:0});
  saved=storage.getPlay(play.id);
  assert.equal(saved.characterMemories['role-a'].autoReview.checkedTurns,10);
  assert.equal(saved.characterMemories['role-a'].automaticEntries.length,1);
@@ -68,7 +69,16 @@ try {
  assert.equal(saved.characterMemories['role-a'].automaticEntries[0].disable,true);
  assert.equal(saved.characterMemories['role-a'].book.entries[0].content,manual.content);
  assert.equal(saved.characterMemories['role-a'].book.entries.length,1);
+ assert.equal((await save({autoReview:{enabled:true,interval:5},requestReview:"bad"})).status,400);
+ assert.equal((await save({autoReview:{enabled:true,interval:5},requestReview:true})).status,200);
+ saved=storage.getPlay(play.id);
+ assert.equal(saved.characterMemories['role-a'].autoReview.requested,true);
+ assert.equal(saved.characterMemories['role-a'].autoReview.checkedTurns,0);
+ assert.equal(saved.characterMemories['role-a'].automaticEntries.length,1);
+ assert.equal(saved.characterMemories['role-a'].book.entries[0].content,manual.content);
  const reopened=await LibraryStore.open(root,logger);
  assert.deepEqual(reopened.play(play.id),JSON.parse(JSON.stringify(saved)));
  console.log('PASS auto memory: interval, completed-only text, no reasoning, owner/session guards, quote validation, dedup, no-change cursor, manual preservation, branch guard, durable read-back.');
 }finally{await rm(root,{recursive:true,force:true})}
+
+await import('./check-auto-memory-recovery.mjs');
