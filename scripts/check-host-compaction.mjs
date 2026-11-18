@@ -29,14 +29,18 @@ try {
  await ctx.plugin(persistence,{root:join(directory,'sessions'),compression:'zstd',listConcurrency:2}).await();
  await ctx.plugin(nativeExecutor.default??nativeExecutor).await();
  const source=await readFile(new URL('../dist/dsh-tavern/lib/index.js',import.meta.url),'utf8');
- await writeFile(join(directory,'tavern.mjs'),source+'\nexport {TAVERN_PRESET_DEFINITION,TavernSessionRuntime,LibraryStore,TavernStorage,greetingSeed};');
- const {TAVERN_PRESET_DEFINITION:definition,TavernSessionRuntime:Runtime,LibraryStore,TavernStorage,greetingSeed}=await import(pathToFileURL(join(directory,'tavern.mjs')));
- ctx.agentPresets.register(definition);
- const library=await LibraryStore.open(join(directory,'library'),console),storage=new TavernStorage(library,{get:()=>({})});
+ await writeFile(join(directory,'tavern.mjs'),source+'\nexport {greetingSeed};');
+ const tavern=await import(pathToFileURL(join(directory,'tavern.mjs')));
+ const {greetingSeed}=tavern;
+ ctx.provide('dshHomePath', (...parts) => join(directory, 'profile', ...parts));
+ ctx.provide('agentDefaultModel', { currentSelection: () => ({provider:'fixture',model:'model-one'}) });
+ ctx.provide('webServer', { register: () => () => {} });
+ await ctx.plugin(tavern, {scanMessages:12,worldInfoBudgetChars:8000}).await();
+ const {storage}=ctx.tavern;
+ runtime=ctx.tavern.runtime;
  await storage.upsertCharacter({id:'role-one',card:{data:{name:'角色甲',description:'虚构测试角色。',personality:'平静',scenario:'图书馆',system_prompt:'',post_history_instructions:'',mes_example:'',first_mes:''}}});
  const play={id:'play-one',sessionId:'fixture-director',characterIds:['role-one'],multiAgent:false,updatedAt:'v1',title:'Fixture'};
  await storage.upsertPlay(play);
- runtime=new Runtime({storage,logger:console,agents:ctx.agents,agentPresets:ctx.agentPresets,sessionPersistence:ctx.sessionPersistence,ensurePreset:async()=>{},workspace:()=>undefined,workspacePath:directory,defaultModel:()=>({provider:'fixture',model:'model-one'}),config:{scanMessages:12,worldInfoBudgetChars:8000}});
   const makeSeed=(turnCount=8, shortFirst=false)=>{
   const result=[];
   for(let turn=1;turn<=turnCount;turn++){

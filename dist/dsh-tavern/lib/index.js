@@ -3023,10 +3023,10 @@ const AUTO_COMPACTION_MIN_TOKENS = 2048;
 const AUTO_COMPACTION_TIMEOUT_MS = 20000;
 const AUTO_COMPACTION_RETRY_DELAY_MS = 5 * 60 * 1000;
 
-function limitTavernPressureCompaction(backend) {
+function limitTavernPressureCompaction(backend, tokenMeter) {
     const compactIfNeeded = backend.compactIfNeeded;
     const compactRegion = backend.compactRegion;
-    if (typeof compactIfNeeded !== "function" || typeof compactRegion !== "function" || !backend.ctx?.tokenMeter) return;
+    if (typeof compactIfNeeded !== "function" || typeof compactRegion !== "function" || !tokenMeter) return;
     const deferred = Symbol("defer pressure compaction");
     const active = new WeakMap();
     const latest = new WeakMap();
@@ -3037,7 +3037,7 @@ function limitTavernPressureCompaction(backend) {
         if (attempt.started) throw deferred;
 
         // Use the native engine's route-priced range, excluding the fixed system/tool envelope.
-        const nodes = this.ctx.tokenMeter.measure(agent.session).nodes;
+        const nodes = tokenMeter.measure(agent.session).nodes;
         const first = nodes.findIndex(node => node.seq === start);
         const last = nodes.findIndex(node => node.seq === end);
         if (first < 0 || last < first) throw deferred;
@@ -3094,7 +3094,9 @@ var TavernSessionRuntime = class {
             const guidance = { role: "system", content: [{ type: "text", text: "本次压缩对象是角色扮演剧情。请用简体中文形成可续演的剧情检查点，重点保留：当前时间地点与在场人物、剧情推进到哪一步、角色关系与已确认的重要事实、各角色各自知情范围、未兑现约定与待解决冲突、用户的叙事偏好及最后交接场景。区分已经发生、尚未发生和猜测；不要复述完整对话，不编造进展，不写编程任务或文件清单。保留仍有效的旧摘要信息并合并新变化。" }] };
             return summarize.call(this, { ...input, messages: [guidance, ...input.messages] }, owner, signal);
         };
-        if (this.deps.agentPresets.composedPreset?.(agent.ctx) === TAVERN_PRESET_ID) limitTavernPressureCompaction(backend);
+        if (this.deps.agentPresets.composedPreset?.(agent.ctx) === TAVERN_PRESET_ID) {
+            limitTavernPressureCompaction(backend, this.deps.tokenMeter?.());
+        }
         backend[Symbol.for("tavern.story-compaction")] = true;
         return backend;
     }
@@ -3487,7 +3489,11 @@ var TavernSessionRuntime = class {
 			} catch (error) {
 				this.deps.logger.warn(`tavern: preset "${presetId}" failed to mount (${String(error)}); session runs without it`);
 			}
-            if (agent) this.configureCompaction(agent);
+            if (agent) try {
+                this.configureCompaction(agent);
+            } catch (error) {
+                this.deps.logger.warn(`tavern: could not configure compaction (${String(error)})`);
+            }
             const track = release => { if (cleanup) cleanup.push(release); };
 			track(agentCtx.systemPrompt.section({
 				name: TAVERN_SECTION,
@@ -5858,6 +5864,7 @@ var TavernService = class {
 			agentPresets: ctx.agentPresets,
 			streamLlm: options => ctx.llm.stream(options),
 			workspace: () => ctx.get("workspaceRegistry"),
+			tokenMeter: () => ctx.get("tokenMeter"),
 			sessionPersistence: ctx.sessionPersistence,
 			ensurePreset: () => this.ensurePreset(),
 			defaultModel: () => {
