@@ -64,4 +64,21 @@ assert.deepEqual(rows(tool('legacy', '乙：是我。', { characterName: '乙' }
 assert.deepEqual(rows(tool('default', '角色：我在。', {})).map(row => row.text), ['我在。']);
 assert.deepEqual(rows(tool('error', '角色：出错了。', {}, { isError: true }), tool('foreign', '私有工具结果。', {}, { name: 'other' })), []);
 assert.equal(rows(narration)[0].messageId, 'director-msg');
+const reasoningStep = {
+  ...director('', { step: 1 }),
+  data: { ...director('', { step: 1 }).data, blocks: [
+    { kind: 'reasoning', text: '确认角色后调用工具。' }, { kind: 'tool-call', name: 'tavern_speak' }
+  ], finalNode: { messageId: 'non-editable-tool-step' } }
+};
+const withDirector = rows(reasoningStep, role, director('甲：她轻声说。\n“我愿意。”'));
+assert.equal(withDirector.length, 1);
+assert.equal(withDirector[0].thinking, '确认角色后调用工具。');
+assert.equal(withDirector[0].messageId, 'director-msg');
+const withRoleOnly = rows(reasoningStep, role);
+assert.equal(withRoleOnly.length, 1);
+assert.equal(withRoleOnly[0].thinking, '确认角色后调用工具。');
+assert.equal(withRoleOnly[0].text, '她轻声说。\n\n“我愿意。”');
+const beforeOtherTurn = rows(reasoningStep, director('新一轮。', {turn: 2}));
+assert.equal(beforeOtherTurn[0].messageId, undefined);
+assert.equal(beforeOtherTurn[1].thinking, undefined);
 console.log('PASS Tavern role results, director narration, same-turn quotation, streaming, legacy names and failed/unrelated tools.');

@@ -2064,7 +2064,7 @@ function projectScene(items, characterNames, initialNames, override) {
 			const [editing, setEditing] = (0, react.useState)(false);
 			const [draft, setDraft] = (0, react.useState)("");
 			const cls = message.kind === "user" ? `${TavernView_module_css_default.msg} ${TavernView_module_css_default.msgUser}` : message.name === void 0 ? `${TavernView_module_css_default.msg} ${TavernView_module_css_default.msgNarrator}` : TavernView_module_css_default.msg;
-			const canEdit = message.messageId !== void 0 && !props.running && !props.busy;
+			const canEdit = message.text !== "" && message.messageId !== void 0 && !props.running && !props.busy;
 			const showSwipe = props.isLastAssistant && props.swipe !== void 0 && props.swipe.count > 1;
 			const showRetry = props.isLastAssistant && !props.running;
 			const streaming = message.status === "streaming";
@@ -3817,8 +3817,14 @@ function projectScene(items, characterNames, initialNames, override) {
 			const out = [];
 			// Keep role replies after the director's text within each conversation turn.
 			const pendingRoleReplies = [];
+			const pendingToolThinking = [];
+			const takeToolThinking = () => pendingToolThinking.splice(0).map(row => row.thinking).join("\n\n");
 			const flushRoleReplies = () => {
-				out.push(...pendingRoleReplies);
+				if (pendingRoleReplies.length && pendingToolThinking.length) {
+					pendingRoleReplies[0].thinking = takeToolThinking();
+				}
+				out.push(...pendingToolThinking, ...pendingRoleReplies);
+				pendingToolThinking.length = 0;
 				pendingRoleReplies.length = 0;
 			};
 			for (const key of snapshot.order) {
@@ -3826,7 +3832,8 @@ function projectScene(items, characterNames, initialNames, override) {
 				if (node === void 0) continue;
 				const userInput = node.kind === "user" || node.kind === "steering";
 				const turn = node.location?.turn?.turn ?? (node.kind === "assistant-step" ? node.data.turn : void 0);
-				if (pendingRoleReplies.length && (userInput || (turn !== void 0 && turn !== pendingRoleReplies[0].roleReplyTurn))) {
+				const pendingTurn = pendingToolThinking[0]?.turn ?? pendingRoleReplies[0]?.roleReplyTurn;
+				if (pendingTurn !== void 0 && (userInput || (turn !== void 0 && turn !== pendingTurn))) {
 					flushRoleReplies();
 				}
 				if (userInput) {
@@ -3868,6 +3875,11 @@ function projectScene(items, characterNames, initialNames, override) {
 						status = "error";
 						errorText = mark.error;
 					}
+					if (text === "" && data.status === "settled" && blocks.some(block => block.kind === "tool-call" && block.name === "tavern_speak")) {
+						pendingToolThinking.push({ id: `${key}#0`, kind: "assistant", turn: data.turn, text, thinking, status, errorText });
+						continue;
+					}
+					const displayThinking = text === "" ? thinking : [takeToolThinking(), thinking].filter(Boolean).join("\n\n");
 					const runs = splitSpeakerRuns(text, characterNames);
 					runs.forEach((run, index) => {
 						const isTail = index === runs.length - 1;
@@ -3876,7 +3888,7 @@ function projectScene(items, characterNames, initialNames, override) {
 							kind: "assistant",
 							...run.name !== void 0 ? { name: run.name } : {},
 							text: data.status === "running" ? run.text : restoreRoleReplyPrefix(run, pendingRoleReplies),
-							...thinking !== "" && index === 0 ? { thinking } : {},
+							...displayThinking !== "" && index === 0 ? { thinking: displayThinking } : {},
 							status: isTail ? status : "done",
 							...isTail && errorText !== void 0 ? { errorText } : {},
 							...isTail && data.finalNode?.messageId !== void 0 ? {

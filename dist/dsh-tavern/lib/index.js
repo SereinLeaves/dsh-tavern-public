@@ -2417,7 +2417,7 @@ const TAVERN_PRESET_DEFINITION = {
         id: "compaction", name: "cordis:group", group: true,
         isolate: { compaction: true },
         config: [
-            { id: "compaction-basic", name: "@deepseek-ai/dsh-compaction-basic", config: { auto: true, thresholdRatio: 0.2, retainRatio: 0.05, headroomTokens: 8192, maxTokens: 4096, maxOverflowRetries: 1 } },
+            { id: "compaction-basic", name: "@deepseek-ai/dsh-compaction-basic", config: { auto: true, thresholdRatio: 0.7, retainRatio: 0.05, headroomTokens: 8192, maxTokens: 4096, maxOverflowRetries: 1 } },
             { id: "command-compact", name: "@deepseek-ai/dsh-command-compact" }
         ]
     }]
@@ -3019,6 +3019,63 @@ function dueMemoryReviews(play, events) {
  return { ...window, due };
 }
 
+const AUTO_COMPACTION_MIN_TOKENS = 2048;
+const AUTO_COMPACTION_TIMEOUT_MS = 20000;
+const AUTO_COMPACTION_RETRY_DELAY_MS = 5 * 60 * 1000;
+
+function limitTavernPressureCompaction(backend) {
+    const compactIfNeeded = backend.compactIfNeeded;
+    const compactRegion = backend.compactRegion;
+    if (typeof compactIfNeeded !== "function" || typeof compactRegion !== "function" || !backend.ctx?.tokenMeter) return;
+    const deferred = Symbol("defer pressure compaction");
+    const active = new WeakMap();
+    const latest = new WeakMap();
+
+    backend.compactRegion = async function(start, end, agent, signal) {
+        const attempt = active.get(agent);
+        if (!attempt) return compactRegion.call(this, start, end, agent, signal);
+        if (attempt.started) throw deferred;
+
+        // Use the native engine's route-priced range, excluding the fixed system/tool envelope.
+        const nodes = this.ctx.tokenMeter.measure(agent.session).nodes;
+        const first = nodes.findIndex(node => node.seq === start);
+        const last = nodes.findIndex(node => node.seq === end);
+        if (first < 0 || last < first) throw deferred;
+        const tokens = nodes.slice(first, last + 1).reduce((sum, node) => sum + node.tokens, 0);
+        if (tokens < AUTO_COMPACTION_MIN_TOKENS) throw deferred;
+
+        signal?.throwIfAborted();
+        attempt.started = true;
+        attempt.result = await compactRegion.call(this, start, end, agent, signal);
+        return attempt.result;
+    };
+    backend.compactIfNeeded = async function(agent, trigger, signal) {
+        if (trigger !== "pressure") return compactIfNeeded.call(this, agent, trigger, signal);
+
+        const turnStart = agent.session.snapshotEvents().findLast(event => event.type === "turn/start")?.seq;
+        const previous = latest.get(agent);
+        if (active.has(agent) || (previous && (previous.turnStart === turnStart || previous.retryAfter > Date.now()))) return null;
+
+        const attempt = { started: false, result: null };
+        const deadline = AbortSignal.timeout(AUTO_COMPACTION_TIMEOUT_MS);
+        active.set(agent, attempt);
+        try {
+            return await compactIfNeeded.call(this, agent, trigger, AbortSignal.any([signal, deadline]));
+        } catch (error) {
+            if (error === deferred) return attempt.result;
+            throw error;
+        } finally {
+            active.delete(agent);
+            if (attempt.started) {
+                latest.set(agent, {
+                    turnStart,
+                    retryAfter: attempt.result === null && !signal.aborted ? Date.now() + AUTO_COMPACTION_RETRY_DELAY_MS : 0
+                });
+            }
+        }
+    };
+}
+
 var TavernSessionRuntime = class {
     // Options belong to the plugin; DSH keeps this object as its live fallback.
     liveOptions = new WeakMap();
@@ -3037,6 +3094,7 @@ var TavernSessionRuntime = class {
             const guidance = { role: "system", content: [{ type: "text", text: "本次压缩对象是角色扮演剧情。请用简体中文形成可续演的剧情检查点，重点保留：当前时间地点与在场人物、剧情推进到哪一步、角色关系与已确认的重要事实、各角色各自知情范围、未兑现约定与待解决冲突、用户的叙事偏好及最后交接场景。区分已经发生、尚未发生和猜测；不要复述完整对话，不编造进展，不写编程任务或文件清单。保留仍有效的旧摘要信息并合并新变化。" }] };
             return summarize.call(this, { ...input, messages: [guidance, ...input.messages] }, owner, signal);
         };
+        if (this.deps.agentPresets.composedPreset?.(agent.ctx) === TAVERN_PRESET_ID) limitTavernPressureCompaction(backend);
         backend[Symbol.for("tavern.story-compaction")] = true;
         return backend;
     }

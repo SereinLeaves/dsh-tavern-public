@@ -37,12 +37,13 @@ try {
  const play={id:'play-one',sessionId:'fixture-director',characterIds:['role-one'],multiAgent:false,updatedAt:'v1',title:'Fixture'};
  await storage.upsertPlay(play);
  runtime=new Runtime({storage,logger:console,agents:ctx.agents,agentPresets:ctx.agentPresets,sessionPersistence:ctx.sessionPersistence,ensurePreset:async()=>{},workspace:()=>undefined,workspacePath:directory,defaultModel:()=>({provider:'fixture',model:'model-one'}),config:{scanMessages:12,worldInfoBudgetChars:8000}});
-  const makeSeed=()=>{
+  const makeSeed=(turnCount=8, shortFirst=false)=>{
   const result=[];
-  for(let turn=1;turn<=8;turn++){
-   const block=greetingSeed('角色甲：'+('当晚在图书馆确认计划，约定下次见面。'.repeat(80)),'fixture','model-one');
+  for(let turn=1;turn<=turnCount;turn++){
+   const short = shortFirst && turn === 1;
+   const block=greetingSeed('角色甲：'+('当晚在图书馆确认计划，约定下次见面。'.repeat(short ? 1 : 80)),'fixture','model-one');
    const offset=result.length;
-   for(const row of block){row.seq+=offset;if('turn'in row.data)row.data.turn=turn;if(row.type==='user/message')row.data.content[0].text='询问当前约定和场景。'.repeat(100);}
+   for(const row of block){row.seq+=offset;if('turn'in row.data)row.data.turn=turn;if(row.type==='user/message')row.data.content[0].text='询问当前约定和场景。'.repeat(short ? 1 : 100);}
    result.push(...block);
   }
   return result;
@@ -56,9 +57,9 @@ try {
  const calls=[];
  ctx.llm.stream=async function*(request){
   calls.push(request);
-  if(mode==='fail')throw Error('synthetic summary failure');
-  if(mode==='wait'){
-   began.resolve();
+  if(mode==='fail' || mode==='auto-fail' && request.purpose==='compaction')throw Error('synthetic summary failure');
+  if(mode==='wait' || mode==='auto-wait' && request.purpose==='compaction'){
+   began?.resolve();
    await new Promise((_,reject)=>{if(request.signal.aborted)reject(request.signal.reason);else request.signal.addEventListener('abort',()=>reject(request.signal.reason),{once:true})});
   }
   yield {type:'text-delta',index:0,text:request.purpose==='compaction'?'当前剧情：双方已约定在图书馆会合，尚未见面。':'角色甲：收到。'};
@@ -75,9 +76,9 @@ try {
  assert.ok(after.some(e=>e.type==='compaction/summary'));
  console.log('PASS native manual compaction, story instructions, and original event preservation');
  assert.ok(ctx.commands.list(handle.agent).some(command=>command.name==='compact'));
- const makePlay=async name=>{
+ const makePlay=async (name, seed=makeSeed())=>{
   const next={...play,id:name,sessionId:name};await storage.upsertPlay(next);
-  const h=await runtime.ensureDirector(next,makeSeed());return {play:next,agent:h.agent,backend:runtime.configureCompaction(h.agent)};
+  const h=await runtime.ensureDirector(next,seed);return {play:next,agent:h.agent,backend:runtime.configureCompaction(h.agent)};
  };
  const failed=await makePlay('fixture-failed');
  const failedOriginal=structuredClone(failed.agent.session.snapshotEvents());
@@ -100,7 +101,7 @@ try {
  assert.deepEqual(cancelled.agent.session.snapshotEvents().slice(0,rows.length),rows);
  assert.deepEqual([...cancelled.agent.session.surface.nodes],surface);
  mode='normal';
- const automatic=await makePlay('fixture-automatic');
+ const automatic=await makePlay('fixture-automatic', makeSeed(16));
  const automaticOriginal=structuredClone(automatic.agent.session.snapshotEvents());
  const callsBefore=calls.length;
  // First turn creates a routed request header; the next pre-step prices that envelope.
@@ -112,6 +113,61 @@ try {
  assert.ok(automatic.agent.session.snapshotEvents().some(e=>e.type==='compaction/summary'));
  assert.deepEqual(automatic.agent.session.snapshotEvents().slice(0,automaticOriginal.length),automaticOriginal);
  for(const request of calls.filter(call=>call.purpose==='compaction'))assert.equal(request.messages.filter(m=>m.role==='system'&&m.content.some(b=>b.text?.includes('本次压缩对象是角色扮演剧情'))).length,1);
+ const tiny = await makePlay('fixture-tiny-prefix', makeSeed(2, true));
+ const send = async (agent, id) => {
+  agent.followup({id,role:'user',content:[{type:'text',text:'继续当前场景。'}],source:{kind:'user'}});
+  await agent.whenIdle();
+ };
+ await send(tiny.agent, 'tiny-first');
+ const measure = ctx.tokenMeter.measure;
+ let priced = false;
+ ctx.tokenMeter.measure = function(session, ...args) {
+  const trueMeasurement = measure.call(this, session, ...args);
+  if (session !== tiny.agent.session) return trueMeasurement;
+  priced = true;
+  // Simulate a large fixed tool envelope with a tiny compactable history prefix.
+  return { ...trueMeasurement, totalTokens: trueMeasurement.totalTokens + 12000 };
+ };
+ const tinyBefore = calls.length;
+ try { await send(tiny.agent, 'tiny-second'); }
+ finally { ctx.tokenMeter.measure = measure; }
+ assert.ok(priced);
+ assert.deepEqual(calls.slice(tinyBefore).map(call => call.purpose), [undefined]);
+ assert.ok(!tiny.agent.session.snapshotEvents().some(e => e.type === 'compaction/start'));
+ assert.equal(tiny.agent.session.snapshotEvents().at(-1).data.reason.kind, 'completed');
+
+ const retry = await makePlay('fixture-auto-failure', makeSeed(16));
+ await send(retry.agent, 'failure-first');
+ mode = 'auto-fail';
+ const retryBefore = calls.length;
+ await send(retry.agent, 'failure-second');
+ await send(retry.agent, 'failure-third');
+ assert.equal(calls.slice(retryBefore).filter(call => call.purpose === 'compaction').length, 1);
+ assert.equal(retry.agent.session.snapshotEvents().filter(e => e.type === 'compaction/end' && e.data.error).length, 1);
+ assert.equal(retry.agent.session.snapshotEvents().at(-1).data.reason.kind, 'completed');
+ mode = 'normal';
+ const slow = await makePlay('fixture-auto-timeout', makeSeed(16));
+ await send(slow.agent, 'slow-first');
+ const timeout = AbortSignal.timeout;
+ const keeper = setTimeout(() => {}, 500);
+ const slowBefore = calls.length;
+ let sawDeadline = false;
+ mode = 'auto-wait';
+ began = undefined;
+ AbortSignal.timeout = (ms) => {
+  if (ms !== 20000) return timeout(ms);
+  sawDeadline = true;
+  return timeout(75);
+ };
+ try { await send(slow.agent, 'slow-second'); }
+ finally { clearTimeout(keeper); AbortSignal.timeout = timeout; mode = 'normal'; }
+ const timed = calls.slice(slowBefore).find(call => call.purpose === 'compaction');
+ assert.ok(sawDeadline && timed?.signal.aborted);
+ const slowEvents = slow.agent.session.snapshotEvents();
+ assert.ok(slowEvents.some(e => e.type === 'compaction/end' && e.data.error));
+ assert.equal(slowEvents.at(-1).data.reason.kind, 'completed');
+ assert.ok(!slowEvents.some(e => e.type === 'compaction/summary'));
+ console.log('PASS skip tiny prefixes, back off after failure, and cancel timed-out automatic summarization while replies continue.');
  const command=await makePlay('fixture-command');
  const commandOriginal=structuredClone(command.agent.session.snapshotEvents());
  const commandResult=await ctx.commands.execute(command.agent,'/compact',[],new AbortController().signal);
